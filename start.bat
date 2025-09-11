@@ -1,5 +1,5 @@
 @echo off
-echo Starting Meeting Recorder in development mode...
+echo Starting 會議轉錄工具 in development mode...
 echo.
 
 echo Step 1/3: Installing dependencies...
@@ -19,5 +19,5 @@ echo Starting Electron application...
 call npm run electron
 
 echo.
-echo Meeting Recorder development setup complete!
+echo 會議轉錄工具 development setup complete!
 pause

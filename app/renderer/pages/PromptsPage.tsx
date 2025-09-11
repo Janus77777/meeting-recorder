@@ -18,6 +18,17 @@ const PromptsPage: React.FC<PromptsPageProps> = ({ onTestPrompt }) => {
     VocabularyService.formatVocabularyToString(settings.vocabularyList)
   );
   
+  // 本地狀態管理提示詞，避免直接綁定到 settings
+  const [transcriptPrompt, setTranscriptPrompt] = useState<string>(settings.customTranscriptPrompt || '');
+  const [summaryPrompt, setSummaryPrompt] = useState<string>(settings.customSummaryPrompt || '');
+  
+  // 同步設定變更到本地狀態
+  React.useEffect(() => {
+    setTranscriptPrompt(settings.customTranscriptPrompt || '');
+    setSummaryPrompt(settings.customSummaryPrompt || '');
+    setVocabularyText(VocabularyService.formatVocabularyToString(settings.vocabularyList));
+  }, [settings.customTranscriptPrompt, settings.customSummaryPrompt, settings.vocabularyList]);
+  
   const defaultTranscriptPrompt = `你是語音轉文字 (STT) 後處理的專家編輯器。
 
 嚴格目標：
@@ -74,6 +85,29 @@ const PromptsPage: React.FC<PromptsPageProps> = ({ onTestPrompt }) => {
 
 請以清楚易懂的方式整理，適合與會者快速回顧。`;
 
+  // 保存提示詞到設定
+  const savePrompts = () => {
+    updateSettings({
+      customTranscriptPrompt: transcriptPrompt,
+      customSummaryPrompt: summaryPrompt
+    });
+    alert('提示詞已保存！');
+  };
+  
+  // 載入預設轉錄提示詞範本
+  const loadDefaultTranscriptPrompt = () => {
+    if (confirm('確定要載入預設轉錄提示詞範本嗎？這將覆蓋目前的內容。')) {
+      setTranscriptPrompt(defaultTranscriptPrompt);
+    }
+  };
+  
+  // 載入預設摘要提示詞範本
+  const loadDefaultSummaryPrompt = () => {
+    if (confirm('確定要載入預設摘要提示詞範本嗎？這將覆蓋目前的內容。')) {
+      setSummaryPrompt(defaultSummaryPrompt);
+    }
+  };
+
   const testTranscriptPrompt = async () => {
     if (!settings.geminiApiKey) {
       alert('請先在設定頁面輸入 Gemini API Key');
@@ -84,13 +118,13 @@ const PromptsPage: React.FC<PromptsPageProps> = ({ onTestPrompt }) => {
     try {
       const geminiClient = new GeminiAPIClient(settings.geminiApiKey);
       
-      // 測試提示詞功能 - 這裡我們用一個簡單的測試文本
-      const testPrompt = settings.customTranscriptPrompt || defaultTranscriptPrompt;
+      // 使用當前輸入框的內容進行測試
+      const testPrompt = transcriptPrompt || defaultTranscriptPrompt;
       
       // 模擬一個簡短的測試請求
       const testText = "請用這個提示詞處理測試音訊：測試音訊檔案";
       
-      alert('提示詞格式檢查完成！\n\n自訂轉錄提示詞:\n' + testPrompt);
+      alert('提示詞格式檢查完成！\n\n目前轉錄提示詞:\n' + testPrompt);
       
     } catch (error) {
       console.error('測試轉錄提示詞失敗:', error);
@@ -110,7 +144,8 @@ const PromptsPage: React.FC<PromptsPageProps> = ({ onTestPrompt }) => {
     try {
       const geminiClient = new GeminiAPIClient(settings.geminiApiKey);
       
-      const testPrompt = settings.customSummaryPrompt || defaultSummaryPrompt;
+      // 使用當前輸入框的內容進行測試
+      const testPrompt = summaryPrompt || defaultSummaryPrompt;
       const testTranscript = "測試會議轉錄內容：今天我們討論了產品開發進度和市場策略。";
       
       const result = await geminiClient.generateCustomSummary(testTranscript, testPrompt);
@@ -151,12 +186,15 @@ const PromptsPage: React.FC<PromptsPageProps> = ({ onTestPrompt }) => {
 
   const resetToDefaults = () => {
     if (confirm('確定要重設為預設設定嗎？這將覆蓋您目前的自訂提示詞和詞彙表。')) {
+      setTranscriptPrompt(defaultTranscriptPrompt);
+      setSummaryPrompt(defaultSummaryPrompt);
+      setVocabularyText('');
       updateSettings({
         customTranscriptPrompt: defaultTranscriptPrompt,
         customSummaryPrompt: defaultSummaryPrompt,
         vocabularyList: []
       });
-      setVocabularyText('');
+      alert('已重設為預設設定！');
     }
   };
 
@@ -327,8 +365,8 @@ aqr: 品質報告`}
             </p>
             
             <textarea
-              value={settings.customTranscriptPrompt || defaultTranscriptPrompt}
-              onChange={(e) => updateSettings({ customTranscriptPrompt: e.target.value })}
+              value={transcriptPrompt}
+              onChange={(e) => setTranscriptPrompt(e.target.value)}
               placeholder="輸入自訂的轉錄提示詞..."
               style={{
                 width: '100%',
@@ -343,22 +381,39 @@ aqr: 品質報告`}
               }}
             />
             
-            <button
-              onClick={testTranscriptPrompt}
-              disabled={isLoading}
-              style={{
-                padding: '0.5rem 1rem',
-                backgroundColor: '#3b82f6',
-                color: 'white',
-                border: 'none',
-                borderRadius: '4px',
-                fontSize: '0.875rem',
-                cursor: isLoading ? 'not-allowed' : 'pointer',
-                opacity: isLoading ? 0.6 : 1
-              }}
-            >
-              {isLoading ? '檢查中...' : '檢查提示詞格式'}
-            </button>
+            <div style={{ display: 'flex', gap: '0.5rem', marginBottom: '1rem' }}>
+              <button
+                onClick={loadDefaultTranscriptPrompt}
+                style={{
+                  padding: '0.5rem 1rem',
+                  backgroundColor: '#6b7280',
+                  color: 'white',
+                  border: 'none',
+                  borderRadius: '4px',
+                  fontSize: '0.75rem',
+                  cursor: 'pointer'
+                }}
+              >
+                載入預設範本
+              </button>
+              
+              <button
+                onClick={testTranscriptPrompt}
+                disabled={isLoading}
+                style={{
+                  padding: '0.5rem 1rem',
+                  backgroundColor: '#3b82f6',
+                  color: 'white',
+                  border: 'none',
+                  borderRadius: '4px',
+                  fontSize: '0.875rem',
+                  cursor: isLoading ? 'not-allowed' : 'pointer',
+                  opacity: isLoading ? 0.6 : 1
+                }}
+              >
+                {isLoading ? '檢查中...' : '檢查提示詞格式'}
+              </button>
+            </div>
           </div>
 
           {/* 摘要提示詞設定 */}
@@ -390,8 +445,8 @@ aqr: 品質報告`}
             </p>
             
             <textarea
-              value={settings.customSummaryPrompt || defaultSummaryPrompt}
-              onChange={(e) => updateSettings({ customSummaryPrompt: e.target.value })}
+              value={summaryPrompt}
+              onChange={(e) => setSummaryPrompt(e.target.value)}
               placeholder="輸入自訂的摘要提示詞..."
               style={{
                 width: '100%',
@@ -406,22 +461,39 @@ aqr: 品質報告`}
               }}
             />
             
-            <button
-              onClick={testSummaryPrompt}
-              disabled={isLoading}
-              style={{
-                padding: '0.5rem 1rem',
-                backgroundColor: '#10b981',
-                color: 'white',
-                border: 'none',
-                borderRadius: '4px',
-                fontSize: '0.875rem',
-                cursor: isLoading ? 'not-allowed' : 'pointer',
-                opacity: isLoading ? 0.6 : 1
-              }}
-            >
-              {isLoading ? '測試中...' : '測試摘要提示詞'}
-            </button>
+            <div style={{ display: 'flex', gap: '0.5rem', marginBottom: '1rem' }}>
+              <button
+                onClick={loadDefaultSummaryPrompt}
+                style={{
+                  padding: '0.5rem 1rem',
+                  backgroundColor: '#6b7280',
+                  color: 'white',
+                  border: 'none',
+                  borderRadius: '4px',
+                  fontSize: '0.75rem',
+                  cursor: 'pointer'
+                }}
+              >
+                載入預設範本
+              </button>
+              
+              <button
+                onClick={testSummaryPrompt}
+                disabled={isLoading}
+                style={{
+                  padding: '0.5rem 1rem',
+                  backgroundColor: '#10b981',
+                  color: 'white',
+                  border: 'none',
+                  borderRadius: '4px',
+                  fontSize: '0.875rem',
+                  cursor: isLoading ? 'not-allowed' : 'pointer',
+                  opacity: isLoading ? 0.6 : 1
+                }}
+              >
+                {isLoading ? '測試中...' : '測試摘要提示詞'}
+              </button>
+            </div>
           </div>
         </div>
 
@@ -479,7 +551,7 @@ aqr: 品質報告`}
           </button>
           
           <button
-            onClick={() => alert('設定已自動儲存！')}
+            onClick={savePrompts}
             style={{
               padding: '0.75rem 1.5rem',
               backgroundColor: '#059669',
@@ -487,10 +559,11 @@ aqr: 品質報告`}
               border: 'none',
               borderRadius: '6px',
               fontSize: '0.875rem',
-              cursor: 'pointer'
+              cursor: 'pointer',
+              fontWeight: '600'
             }}
           >
-            確認儲存
+            💾 保存提示詞
           </button>
         </div>
 

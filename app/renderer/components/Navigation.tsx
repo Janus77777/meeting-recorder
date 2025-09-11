@@ -69,7 +69,7 @@ export const Navigation: React.FC = () => {
           </div>
           <div>
             <h1 className="text-xl font-bold text-gray-900">會議錄音</h1>
-            <p className="text-xs text-gray-500">Meeting Recorder</p>
+            <p className="text-xs text-gray-500">會議轉錄工具</p>
           </div>
         </div>
       </div>

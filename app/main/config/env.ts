@@ -30,32 +30,8 @@ export const ENV_CONFIGS = {
   }
 };
 
-// Load settings from localStorage or default
-export const loadSettings = (): AppSettings => {
-  try {
-    const stored = localStorage.getItem('app-settings');
-    if (stored) {
-      const parsed = JSON.parse(stored) as Partial<AppSettings>;
-      return {
-        ...DEFAULT_SETTINGS,
-        ...parsed
-      };
-    }
-  } catch (error) {
-    console.error('Failed to load settings:', error);
-  }
-  
-  return DEFAULT_SETTINGS;
-};
-
-// Save settings to localStorage
-export const saveSettings = (settings: AppSettings): void => {
-  try {
-    localStorage.setItem('app-settings', JSON.stringify(settings));
-  } catch (error) {
-    console.error('Failed to save settings:', error);
-  }
-};
+// NOTE: Settings persistence is now handled by Zustand persist middleware
+// using the 'meeting-recorder-settings' key in localStorage
 
 // Get current base URL based on settings
 export const getCurrentBaseURL = (settings: AppSettings): string => {

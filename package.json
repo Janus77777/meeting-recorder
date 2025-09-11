@@ -1,5 +1,5 @@
 {
-  "name": "meeting-recorder",
+  "name": "meeting-transcription-tool",
   "version": "1.0.0",
   "description": "",
   "main": "dist/main/main.js",
@@ -50,8 +50,8 @@
     "zustand": "^5.0.8"
   },
   "build": {
-    "appId": "com.meetingrecorder.app",
-    "productName": "Meeting Recorder",
+    "appId": "com.meetingtranscriptiontool.app",
+    "productName": "會議轉錄工具",
     "directories": {
       "output": "release"
     },
@@ -85,7 +85,7 @@
       "allowToChangeInstallationDirectory": true,
       "createDesktopShortcut": true,
       "createStartMenuShortcut": true,
-      "shortcutName": "Meeting Recorder"
+      "shortcutName": "會議轉錄工具"
     },
     "publish": {
       "provider": "github",

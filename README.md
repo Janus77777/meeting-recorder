@@ -1,4 +1,4 @@
-# Meeting Recorder 會議錄音
+# 會議轉錄工具
 
 一個 Windows 桌面應用程式，能夠錄音、自動轉錄並生成會議摘要。
 
@@ -238,7 +238,7 @@ npm run dist         # 打包 Windows 安裝檔
 ### 日誌查看
 - 開發模式：在 DevTools Console 查看
 - 生產模式：在 Windows 事件檢視器查看
-- Electron 日誌：`%APPDATA%/Meeting Recorder/logs/`
+- Electron 日誌：`%APPDATA%/會議轉錄工具/logs/`
 
 ## 貢獻指南
 

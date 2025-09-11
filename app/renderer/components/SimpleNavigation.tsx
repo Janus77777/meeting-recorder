@@ -1,4 +1,5 @@
 import React, { useState } from 'react';
+import { AppSettings } from '@shared/types';
 
 interface SimpleNavigationProps {
   currentPage: 'record' | 'jobs' | 'result' | 'prompts' | 'settings';
@@ -6,6 +7,7 @@ interface SimpleNavigationProps {
   jobCount?: number;
   activeJobCount?: number;
   completedJobCount?: number;
+  settings?: AppSettings;
 }
 
 export const SimpleNavigation: React.FC<SimpleNavigationProps> = ({ 
@@ -13,7 +15,8 @@ export const SimpleNavigation: React.FC<SimpleNavigationProps> = ({
   onPageChange, 
   jobCount = 0, 
   activeJobCount = 0, 
-  completedJobCount = 0 
+  completedJobCount = 0,
+  settings 
 }) => {
   const navItems = [
     {
@@ -83,7 +86,7 @@ export const SimpleNavigation: React.FC<SimpleNavigationProps> = ({
               color: '#6b7280', 
               margin: 0 
             }}>
-              Meeting Recorder
+              會議轉錄工具
             </p>
           </div>
         </div>
@@ -175,25 +178,40 @@ export const SimpleNavigation: React.FC<SimpleNavigationProps> = ({
       <div style={{
         padding: '1rem',
         borderTop: '1px solid #e5e7eb',
-        fontSize: '12px',
+        fontSize: '11px',
         color: '#6b7280'
       }}>
-        <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '4px' }}>
-          <span>模式</span>
+        {/* 版本號 */}
+        <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '6px' }}>
+          <span>版本</span>
+          <span style={{ fontWeight: '500', color: '#374151' }}>v1.0.0</span>
+        </div>
+        
+        {/* AI 模型 */}
+        <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '6px' }}>
+          <span>AI 模型</span>
           <span style={{
-            padding: '2px 8px',
-            borderRadius: '12px',
-            fontSize: '11px',
-            fontWeight: 500,
-            backgroundColor: '#fef3c7',
-            color: '#92400e'
+            padding: '2px 6px',
+            borderRadius: '8px',
+            fontSize: '10px',
+            fontWeight: '500',
+            backgroundColor: settings?.useGemini ? '#dbeafe' : '#f3f4f6',
+            color: settings?.useGemini ? '#1e40af' : '#6b7280'
           }}>
-            Mock
+            {settings?.useGemini ? 'Gemini 2.5 Pro' : 'Custom API'}
           </span>
         </div>
-        <div style={{ display: 'flex', justifyContent: 'space-between' }}>
-          <span>環境</span>
-          <span style={{ textTransform: 'uppercase' }}>DEV</span>
+        
+        {/* 開發者信息 */}
+        <div style={{ 
+          textAlign: 'center', 
+          marginTop: '8px',
+          paddingTop: '6px',
+          borderTop: '1px solid #f3f4f6',
+          fontSize: '10px',
+          color: '#9ca3af'
+        }}>
+          Develop & Maintain by Janus
         </div>
       </div>
     </nav>

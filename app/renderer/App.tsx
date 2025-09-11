@@ -16,6 +16,9 @@ const App: React.FC = () => {
   const [audioChunks, setAudioChunks] = useState<Blob[]>([]);
   const [recordingStatus, setRecordingStatus] = useState<string>('準備開始錄音...');
   const [hasAudioPermission, setHasAudioPermission] = useState<boolean | null>(null);
+  const [recordingMode, setRecordingMode] = useState<'microphone' | 'system' | 'both'>('both'); // 錄音模式
+  const [systemStream, setSystemStream] = useState<MediaStream | null>(null);
+  const [microphoneStream, setMicrophoneStream] = useState<MediaStream | null>(null);
   const [recordings, setRecordings] = useState<Array<{
     id: string;
     filename: string;
@@ -162,20 +165,110 @@ const App: React.FC = () => {
     }
   };
 
-  const startRecording = async () => {
+  // 獲取系統聲音
+  const getSystemAudio = async (): Promise<MediaStream | null> => {
     try {
-      setRecordingStatus('正在啟動錄音...');
+      console.log('正在請求系統聲音權限...');
+      // 請求螢幕分享但只要音訊
+      const stream = await navigator.mediaDevices.getDisplayMedia({
+        video: false,
+        audio: {
+          echoCancellation: false,
+          noiseSuppression: false,
+          autoGainControl: false,
+          sampleRate: 48000
+        }
+      });
+      
+      console.log('系統聲音獲取成功，軌道數:', stream.getAudioTracks().length);
+      return stream;
+    } catch (error) {
+      console.error('系統聲音獲取失敗:', error);
+      return null;
+    }
+  };
+
+  // 獲取麥克風
+  const getMicrophoneAudio = async (): Promise<MediaStream | null> => {
+    try {
+      console.log('正在請求麥克風權限...');
       const stream = await navigator.mediaDevices.getUserMedia({ 
         audio: {
           echoCancellation: true,
           noiseSuppression: true,
-          autoGainControl: true
+          autoGainControl: true,
+          sampleRate: 48000
         } 
       });
       
-      console.log('獲得音訊串流，軌道數:', stream.getAudioTracks().length);
+      console.log('麥克風獲取成功，軌道數:', stream.getAudioTracks().length);
+      return stream;
+    } catch (error) {
+      console.error('麥克風獲取失敗:', error);
+      return null;
+    }
+  };
+
+  // 合併音訊流
+  const mergeAudioStreams = (streams: MediaStream[]): MediaStream => {
+    const audioContext = new AudioContext();
+    const destination = audioContext.createMediaStreamDestination();
+    
+    streams.forEach(stream => {
+      if (stream.getAudioTracks().length > 0) {
+        const source = audioContext.createMediaStreamSource(stream);
+        source.connect(destination);
+      }
+    });
+    
+    return destination.stream;
+  };
+
+  const startRecording = async () => {
+    try {
+      setRecordingStatus('正在啟動錄音...');
       
-      const recorder = new MediaRecorder(stream);
+      let finalStream: MediaStream;
+      const streams: MediaStream[] = [];
+      
+      // 根據錄音模式獲取對應的音訊流
+      if (recordingMode === 'microphone' || recordingMode === 'both') {
+        setRecordingStatus('正在獲取麥克風權限...');
+        const micStream = await getMicrophoneAudio();
+        if (micStream) {
+          streams.push(micStream);
+          setMicrophoneStream(micStream);
+        } else if (recordingMode === 'microphone') {
+          throw new Error('無法獲取麥克風權限');
+        }
+      }
+      
+      if (recordingMode === 'system' || recordingMode === 'both') {
+        setRecordingStatus('正在獲取系統聲音權限...');
+        const sysStream = await getSystemAudio();
+        if (sysStream) {
+          streams.push(sysStream);
+          setSystemStream(sysStream);
+        } else if (recordingMode === 'system') {
+          throw new Error('無法獲取系統聲音權限');
+        }
+      }
+      
+      if (streams.length === 0) {
+        throw new Error('無法獲取任何音訊源');
+      }
+      
+      // 如果有多個音訊流，合併它們
+      if (streams.length > 1) {
+        setRecordingStatus('正在合併音訊源...');
+        finalStream = mergeAudioStreams(streams);
+      } else {
+        finalStream = streams[0];
+      }
+      
+      console.log('最終音訊串流，軌道數:', finalStream.getAudioTracks().length);
+      
+      const recorder = new MediaRecorder(finalStream);
       const chunks: Blob[] = [];
       
       recorder.ondataavailable = (event) => {
@@ -192,7 +285,8 @@ const App: React.FC = () => {
         
         // 生成檔名
         const timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
-        const filename = `recording-${timestamp}.webm`;
+        const modeLabel = recordingMode === 'both' ? 'mixed' : recordingMode === 'system' ? 'system' : 'mic';
+        const filename = `meeting-${modeLabel}-${timestamp}.webm`;
         
         try {
           // 自動保存錄音檔案
@@ -217,24 +311,18 @@ const App: React.FC = () => {
           setRecordingStatus('錄音保存失敗: ' + (error as Error).message);
         }
         
-        stream.getTracks().forEach(track => {
-          console.log('關閉音訊軌道:', track.kind);
-          track.stop();
+        // 清理所有音訊流
+        [systemStream, microphoneStream, finalStream].forEach(stream => {
+          if (stream) {
+            stream.getTracks().forEach(track => {
+              console.log('關閉音訊軌道:', track.kind, track.label);
+              track.stop();
+            });
+          }
         });
         
-        // 保存錄音到列表
-        const newRecording = {
-          id: Date.now().toString(),
-          filename: filename,
-          blob: audioBlob,
-          timestamp: new Date().toLocaleString('zh-TW'),
-          duration: recordingTime,
-          size: audioBlob.size
-        };
-        
-        setRecordings(prev => [newRecording, ...prev]);
-        setRecordingStatus(`錄音完成！檔案已保存: ${filename} (${(audioBlob.size / 1024).toFixed(1)} KB)`);
-        setAudioChunks([audioBlob]); // 保存音訊數據供後續使用
+        setSystemStream(null);
+        setMicrophoneStream(null);
         
         // 自動啟動轉錄流程
         startTranscriptionJob(audioBlob, filename);
@@ -250,7 +338,10 @@ const App: React.FC = () => {
       recorder.start(1000); // 每秒收集一次數據
       setIsRecording(true);
       setRecordingTime(0);
-      setRecordingStatus('錄音中...');
+      
+      const modeText = recordingMode === 'both' ? '系統聲音 + 麥克風' : 
+                      recordingMode === 'system' ? '系統聲音' : '麥克風';
+      setRecordingStatus(`錄音中 (${modeText})...`);
       console.log('開始錄音，MediaRecorder 狀態:', recorder.state);
     } catch (error) {
       console.error('啟動錄音失敗:', error);
@@ -266,6 +357,20 @@ const App: React.FC = () => {
       setIsRecording(false);
       setMediaRecorder(null);
       console.log('錄音結束，總時長:', formatTime(recordingTime));
+      
+      // 立即清理音訊流（防止錄音結束前就清理）
+      setTimeout(() => {
+        [systemStream, microphoneStream].forEach(stream => {
+          if (stream) {
+            stream.getTracks().forEach(track => {
+              console.log('延遲關閉音訊軌道:', track.kind, track.label);
+              track.stop();
+            });
+          }
+        });
+        setSystemStream(null);
+        setMicrophoneStream(null);
+      }, 1000);
     } else {
       console.log('MediaRecorder 狀態異常:', mediaRecorder?.state);
       setRecordingStatus('停止錄音時發生錯誤');
@@ -688,6 +793,105 @@ const App: React.FC = () => {
               </>
             ) : (
               <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem', alignItems: 'center' }}>
+                {/* 錄音模式選擇 */}
+                <div style={{
+                  padding: '1.5rem',
+                  backgroundColor: '#f8fafc',
+                  borderRadius: '8px',
+                  border: '1px solid #e2e8f0',
+                  width: '100%',
+                  maxWidth: '500px'
+                }}>
+                  <h3 style={{ color: '#1f2937', marginBottom: '1rem', fontSize: '16px', textAlign: 'center' }}>
+                    🎯 會議錄音模式
+                  </h3>
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: '0.75rem' }}>
+                    <label style={{
+                      display: 'flex',
+                      alignItems: 'center',
+                      padding: '0.75rem',
+                      backgroundColor: recordingMode === 'both' ? '#dbeafe' : 'white',
+                      border: recordingMode === 'both' ? '2px solid #3b82f6' : '1px solid #d1d5db',
+                      borderRadius: '6px',
+                      cursor: 'pointer',
+                      transition: 'all 0.2s'
+                    }}>
+                      <input
+                        type="radio"
+                        name="recordingMode"
+                        value="both"
+                        checked={recordingMode === 'both'}
+                        onChange={(e) => setRecordingMode(e.target.value as any)}
+                        style={{ marginRight: '0.75rem' }}
+                      />
+                      <div>
+                        <div style={{ fontWeight: '500', color: '#111827' }}>
+                          🔥 混合模式 (推薦)
+                        </div>
+                        <div style={{ fontSize: '12px', color: '#6b7280' }}>
+                          同時錄製系統聲音和麥克風，適合大部分會議場景
+                        </div>
+                      </div>
+                    </label>
+                    
+                    <label style={{
+                      display: 'flex',
+                      alignItems: 'center',
+                      padding: '0.75rem',
+                      backgroundColor: recordingMode === 'system' ? '#dbeafe' : 'white',
+                      border: recordingMode === 'system' ? '2px solid #3b82f6' : '1px solid #d1d5db',
+                      borderRadius: '6px',
+                      cursor: 'pointer',
+                      transition: 'all 0.2s'
+                    }}>
+                      <input
+                        type="radio"
+                        name="recordingMode"
+                        value="system"
+                        checked={recordingMode === 'system'}
+                        onChange={(e) => setRecordingMode(e.target.value as any)}
+                        style={{ marginRight: '0.75rem' }}
+                      />
+                      <div>
+                        <div style={{ fontWeight: '500', color: '#111827' }}>
+                          🔊 系統聲音
+                        </div>
+                        <div style={{ fontSize: '12px', color: '#6b7280' }}>
+                          只錄製系統播放的聲音，適合線上會議錄製
+                        </div>
+                      </div>
+                    </label>
+                    
+                    <label style={{
+                      display: 'flex',
+                      alignItems: 'center',
+                      padding: '0.75rem',
+                      backgroundColor: recordingMode === 'microphone' ? '#dbeafe' : 'white',
+                      border: recordingMode === 'microphone' ? '2px solid #3b82f6' : '1px solid #d1d5db',
+                      borderRadius: '6px',
+                      cursor: 'pointer',
+                      transition: 'all 0.2s'
+                    }}>
+                      <input
+                        type="radio"
+                        name="recordingMode"
+                        value="microphone"
+                        checked={recordingMode === 'microphone'}
+                        onChange={(e) => setRecordingMode(e.target.value as any)}
+                        style={{ marginRight: '0.75rem' }}
+                      />
+                      <div>
+                        <div style={{ fontWeight: '500', color: '#111827' }}>
+                          🎤 麥克風
+                        </div>
+                        <div style={{ fontSize: '12px', color: '#6b7280' }}>
+                          只錄製麥克風輸入，適合單人錄音或訪談
+                        </div>
+                      </div>
+                    </label>
+                  </div>
+                </div>
+                
                 {hasAudioPermission !== true && (
                   <button 
                     onClick={testAudioAccess}
@@ -701,7 +905,7 @@ const App: React.FC = () => {
                       fontSize: '14px'
                     }}
                   >
-                    🎤 測試麥克風權限
+                    🎤 測試權限
                   </button>
                 )}
                 
@@ -715,11 +919,19 @@ const App: React.FC = () => {
                     borderRadius: '8px',
                     border: 'none',
                     cursor: hasAudioPermission === false ? 'not-allowed' : 'pointer',
-                    fontSize: '16px'
+                    fontSize: '16px',
+                    fontWeight: 'bold'
                   }}
                 >
-                  🔴 開始錄音
+                  🔴 開始會議錄音
                 </button>
+                
+                <div style={{ fontSize: '12px', color: '#6b7280', textAlign: 'center', maxWidth: '400px' }}>
+                  <strong>提示：</strong>
+                  {recordingMode === 'both' && '混合模式會要求螢幕分享權限來錄製系統聲音，並要求麥克風權限'}
+                  {recordingMode === 'system' && '系統聲音模式會要求螢幕分享權限來錄製應用程式音訊'}
+                  {recordingMode === 'microphone' && '麥克風模式只需要麥克風權限，適合個人錄音'}
+                </div>
               </div>
             )}
 
@@ -1711,6 +1923,7 @@ const App: React.FC = () => {
         jobCount={jobs.length}
         activeJobCount={jobs.filter(job => job.status !== 'done' && job.status !== 'failed').length}
         completedJobCount={jobs.filter(job => job.status === 'done').length}
+        settings={settings}
       />
 
       {/* Main Content */}

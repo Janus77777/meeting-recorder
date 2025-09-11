@@ -24,7 +24,7 @@ export const useSettingsStore = create<SettingsState>()(
       
       updateSettings: (newSettings) => {
         const updated = { ...get().settings, ...newSettings };
-        console.log('Updating settings:', updated);
+        console.log('🔧 Updating settings:', updated);
         set({ settings: updated });
         
         // Update API client when settings change
@@ -32,15 +32,30 @@ export const useSettingsStore = create<SettingsState>()(
       },
       
       resetSettings: () => {
+        console.log('🔄 Resetting settings to default');
         set({ settings: DEFAULT_SETTINGS });
         updateAPISettings(DEFAULT_SETTINGS);
       }
     }),
     {
       name: 'meeting-recorder-settings',
+      version: 1,
       onRehydrateStorage: () => (state) => {
-        console.log('Rehydrating settings:', state);
-      }
+        console.log('💾 Rehydrating settings from localStorage:', state);
+        if (state && state.settings) {
+          console.log('✅ Settings restored:', {
+            hasGeminiKey: !!state.settings.geminiApiKey,
+            useGemini: state.settings.useGemini,
+            environment: state.settings.environment
+          });
+          // 確保 API 設定被更新
+          updateAPISettings(state.settings);
+        } else {
+          console.log('⚠️ No settings found in localStorage, using defaults');
+        }
+      },
+      skipHydration: false,
+      partialize: (state) => ({ settings: state.settings })
     }
   )
 );
