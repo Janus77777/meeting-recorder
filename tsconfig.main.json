@@ -1,0 +1,17 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "target": "es2020",
+    "module": "commonjs",
+    "outDir": "dist/main",
+    "noEmit": false,
+    "jsx": "preserve"
+  },
+  "include": [
+    "app/main/**/*",
+    "app/shared/**/*"
+  ],
+  "exclude": [
+    "app/renderer/**/*"
+  ]
+}

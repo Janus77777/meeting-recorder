@@ -1,0 +1,97 @@
+{
+  "name": "meeting-recorder",
+  "version": "1.0.0",
+  "description": "",
+  "main": "dist/main/main.js",
+  "scripts": {
+    "dev": "concurrently \"npm run build:main:dev\" \"npm run dev:renderer\"",
+    "dev:renderer": "webpack serve --mode development --config webpack.config.js",
+    "build:main:dev": "webpack --mode development --config webpack.main.config.js --watch",
+    "build:main": "webpack --mode production --config webpack.main.config.js",
+    "build:renderer": "webpack --mode production --config webpack.config.js",
+    "build": "npm run build:main && npm run build:renderer",
+    "electron": "electron .",
+    "dist": "npm run build && electron-builder",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "devDependencies": {
+    "@tailwindcss/postcss": "^4.1.13",
+    "@types/node": "^24.3.1",
+    "@types/react": "^19.1.12",
+    "@types/react-dom": "^19.1.9",
+    "@types/webpack-env": "^1.18.8",
+    "autoprefixer": "^10.4.21",
+    "concurrently": "^9.2.1",
+    "css-loader": "^7.1.2",
+    "electron": "^38.0.0",
+    "electron-builder": "^26.0.12",
+    "electron-squirrel-startup": "^1.0.1",
+    "html-webpack-plugin": "^5.6.4",
+    "postcss": "^8.5.6",
+    "postcss-loader": "^8.2.0",
+    "style-loader": "^4.0.0",
+    "tailwindcss": "^4.1.13",
+    "ts-loader": "^9.5.4",
+    "typescript": "^5.9.2",
+    "webpack": "^5.101.3",
+    "webpack-cli": "^6.0.1",
+    "webpack-dev-server": "^5.2.2",
+    "webpack-node-externals": "^3.0.0"
+  },
+  "dependencies": {
+    "electron-updater": "^6.6.2",
+    "react": "^19.1.1",
+    "react-dom": "^19.1.1",
+    "react-router-dom": "^7.8.2",
+    "zustand": "^5.0.8"
+  },
+  "build": {
+    "appId": "com.meetingrecorder.app",
+    "productName": "Meeting Recorder",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "dist/**/*",
+      "package.json",
+      "node_modules/**/*"
+    ],
+    "extraResources": [
+      {
+        "from": "assets",
+        "to": "assets",
+        "filter": [
+          "**/*"
+        ]
+      }
+    ],
+    "win": {
+      "target": [
+        {
+          "target": "portable",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "artifactName": "${productName}-${version}-Portable.${ext}"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "Meeting Recorder"
+    },
+    "publish": {
+      "provider": "github",
+      "owner": "Janus7778",
+      "repo": "meeting-recorder",
+      "private": false
+    }
+  }
+}
