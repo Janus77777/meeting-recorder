@@ -37,6 +37,9 @@ export interface ElectronAPI {
     testCapabilities: () => Promise<any>;
   };
 
+  // Desktop capturer for system audio
+  getAudioSources: () => Promise<any>;
+
   // Auto-updater methods
   updater: {
     checkForUpdates: () => Promise<{
@@ -109,7 +112,9 @@ const electronAPI: ElectronAPI = {
       ipcRenderer.removeAllListeners('update-progress');
       ipcRenderer.on('update-progress', (event, progress) => callback(progress));
     }
-  }
+  },
+
+  getAudioSources: () => ipcRenderer.invoke('desktopCapturer:getAudioSources')
 };
 
 // Add development helpers in development mode

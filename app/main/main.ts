@@ -152,6 +152,23 @@ class MeetingRecorderApp {
       }
     });
 
+    // Desktop capturer for system audio
+    ipcMain.handle('desktopCapturer:getAudioSources', async () => {
+      try {
+        const { desktopCapturer } = require('electron');
+        const sources = await desktopCapturer.getSources({
+          types: ['screen', 'window'],
+          thumbnailSize: { width: 1, height: 1 }
+        });
+        
+        console.log('🎵 找到的音訊源:', sources.map((s: any) => ({ id: s.id, name: s.name })));
+        return sources;
+      } catch (error) {
+        console.error('❌ 獲取音訊源失敗:', error);
+        throw error;
+      }
+    });
+
     // Development helpers
     if (process.env.NODE_ENV === 'development') {
       ipcMain.handle('dev:openDevTools', () => {

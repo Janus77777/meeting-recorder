@@ -42,43 +42,72 @@ class GeminiAPIClient {
     this.apiKey = apiKey;
   }
 
-  // 測試 API 連接
+  // 測試 API 連接（帶重試機制）
   async testConnection(): Promise<boolean> {
-    try {
-      console.log('測試 Gemini API 連接...');
-      
-      // 使用簡單的 generateContent 請求測試連接
-      const testUrl = `${this.baseURL}/models/gemini-2.5-pro:generateContent?key=${this.apiKey}`;
-      
-      const testResponse = await fetch(testUrl, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json'
-        },
-        body: JSON.stringify({
-          contents: [{
-            parts: [{
-              text: "Hello, just testing connection"
-            }]
-          }]
-        })
-      });
+    const maxRetries = 3;
+    const baseDelay = 10000; // 10秒 - 避免過於頻繁的請求
 
-      console.log('API 連接測試回應狀態:', testResponse.status);
-      
-      if (testResponse.ok) {
-        console.log('✅ API 連接測試成功');
-        return true;
-      } else {
-        const errorText = await testResponse.text();
-        console.error('❌ API 連接測試失敗:', testResponse.status, errorText);
-        return false;
+    for (let attempt = 1; attempt <= maxRetries; attempt++) {
+      try {
+        console.log(`🔄 測試 Gemini API 連接... (第 ${attempt}/${maxRetries} 次嘗試)`);
+        
+        const testUrl = `${this.baseURL}/models/gemini-2.5-pro:generateContent?key=${this.apiKey}`;
+        
+        const testResponse = await fetch(testUrl, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify({
+            contents: [{
+              parts: [{
+                text: "Hello, just testing connection"
+              }]
+            }]
+          })
+        });
+
+        console.log(`📡 API 連接測試回應狀態: ${testResponse.status} (嘗試 ${attempt})`);
+        
+        if (testResponse.ok) {
+          console.log('✅ API 連接測試成功');
+          return true;
+        } else if (testResponse.status === 503) {
+          // 503 服務過載 - 需要重試
+          const errorText = await testResponse.text();
+          console.log(`⏳ API 服務過載 (503)，第 ${attempt}/${maxRetries} 次嘗試失敗`);
+          
+          if (attempt < maxRetries) {
+            const delay = baseDelay * Math.pow(2, attempt - 1); // 指數退避：10s, 20s, 40s
+            console.log(`⏱️ 等待 ${Math.round(delay/1000)}秒後重試...`);
+            await new Promise(resolve => setTimeout(resolve, delay));
+            continue;
+          } else {
+            console.error('❌ API 服務持續過載，請稍後再試');
+            return false;
+          }
+        } else {
+          // 其他錯誤不重試
+          const errorText = await testResponse.text();
+          console.error('❌ API 連接測試失敗:', testResponse.status, errorText);
+          return false;
+        }
+        
+      } catch (error) {
+        console.error(`❌ API 連接測試錯誤 (嘗試 ${attempt}):`, error);
+        
+        if (attempt < maxRetries) {
+          const delay = baseDelay * Math.pow(2, attempt - 1);
+          console.log(`⏱️ 網路錯誤，等待 ${Math.round(delay/1000)}秒後重試...`);
+          await new Promise(resolve => setTimeout(resolve, delay));
+          continue;
+        } else {
+          return false;
+        }
       }
-      
-    } catch (error) {
-      console.error('❌ API 連接測試錯誤:', error);
-      return false;
     }
+
+    return false;
   }
 
   // 使用正確的 Resumable Upload 方法上傳音訊檔案到 Gemini
@@ -235,6 +264,54 @@ class GeminiAPIClient {
     throw new Error('檔案處理超時');
   }
 
+  // 重試機制輔助函數
+  private async retryWithExponentialBackoff<T>(
+    operation: () => Promise<T>, 
+    maxRetries: number = 3, 
+    baseDelay: number = 15000 // 15秒 - 轉錄請求需要更長間隔
+  ): Promise<T> {
+    let lastError: any;
+    
+    for (let attempt = 0; attempt <= maxRetries; attempt++) {
+      try {
+        return await operation();
+      } catch (error: any) {
+        lastError = error;
+        
+        // 檢查是否是 503 錯誤
+        if (error.message && error.message.includes('503')) {
+          console.log(`API 過載 (503)，第 ${attempt + 1}/${maxRetries + 1} 次嘗試失敗`);
+          
+          if (attempt < maxRetries) {
+            const delay = baseDelay * Math.pow(2, attempt); // 指數退避：15s, 30s, 60s
+            console.log(`等待 ${Math.round(delay/1000)}秒後重試...`);
+            await new Promise(resolve => setTimeout(resolve, delay));
+            continue;
+          }
+        }
+        
+        // 檢查是否是 429 配額超出錯誤
+        if (error.message && error.message.includes('429')) {
+          console.log(`API 配額超出 (429)，第 ${attempt + 1}/${maxRetries + 1} 次嘗試失敗`);
+          
+          if (attempt < maxRetries) {
+            const delay = Math.max(baseDelay * Math.pow(2, attempt), 40000); // 至少等待40秒
+            console.log(`配額限制，等待 ${Math.round(delay/1000)}秒後重試...`);
+            await new Promise(resolve => setTimeout(resolve, delay));
+            continue;
+          }
+        }
+        
+        // 對於非 503/429 錯誤，或者已經達到最大重試次數，拋出錯誤
+        if (attempt >= maxRetries) {
+          throw lastError;
+        }
+      }
+    }
+    
+    throw lastError;
+  }
+
   // 生成轉錄內容  
   async generateTranscription(fileUri: string, mimeType?: string, customPrompt?: string, vocabularyList?: any[]): Promise<string> {
     const generateUrl = `${this.baseURL}/models/gemini-2.5-pro:generateContent?key=${this.apiKey}`;
@@ -306,7 +383,8 @@ class GeminiAPIClient {
       }
     };
 
-    try {
+    // 使用重試機制執行轉錄請求
+    return this.retryWithExponentialBackoff(async () => {
       console.log('向 Gemini 發送轉錄請求...', fileUri);
       
       const response = await fetch(generateUrl, {
@@ -320,7 +398,7 @@ class GeminiAPIClient {
       if (!response.ok) {
         const errorText = await response.text();
         console.error('Gemini 轉錄請求失敗:', response.status, errorText);
-        throw new Error(`Gemini API 請求失敗: ${response.status} ${response.statusText}`);
+        throw new Error(`Gemini API 請求失敗: ${response.status}`);
       }
 
       const result: GeminiGenerateContentResponse = await response.json();
@@ -332,11 +410,7 @@ class GeminiAPIClient {
 
       const transcriptText = result.candidates[0].content.parts[0].text;
       return transcriptText;
-
-    } catch (error) {
-      console.error('Gemini 轉錄過程發生錯誤:', error);
-      throw error;
-    }
+    });
   }
 
   // 生成自訂摘要
@@ -370,7 +444,8 @@ ${customPrompt}`;
       }
     };
 
-    try {
+    // 使用重試機制執行自訂摘要請求
+    return this.retryWithExponentialBackoff(async () => {
       console.log('向 Gemini 發送自訂摘要請求...');
       
       const response = await fetch(generateUrl, {
@@ -384,7 +459,7 @@ ${customPrompt}`;
       if (!response.ok) {
         const errorText = await response.text();
         console.error('Gemini 自訂摘要請求失敗:', response.status, errorText);
-        throw new Error(`Gemini API 請求失敗: ${response.status} ${response.statusText}`);
+        throw new Error(`Gemini API 請求失敗: ${response.status}`);
       }
 
       const result: GeminiGenerateContentResponse = await response.json();
@@ -396,11 +471,7 @@ ${customPrompt}`;
 
       const summaryText = result.candidates[0].content.parts[0].text;
       return summaryText;
-
-    } catch (error) {
-      console.error('Gemini 自訂摘要過程發生錯誤:', error);
-      throw error;
-    }
+    });
   }
 
   // 解析 Gemini 回應的 JSON 格式

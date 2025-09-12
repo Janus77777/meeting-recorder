@@ -165,27 +165,44 @@ const App: React.FC = () => {
     }
   };
 
-  // 獲取系統聲音
-  const getSystemAudio = async (): Promise<MediaStream | null> => {
+  // 測試系統聲音權限（簡化版本）
+  const testSystemAudioAccess = async () => {
     try {
-      console.log('正在請求系統聲音權限...');
-      // 請求螢幕分享但只要音訊
-      const stream = await navigator.mediaDevices.getDisplayMedia({
-        video: false,
-        audio: {
-          echoCancellation: false,
-          noiseSuppression: false,
-          autoGainControl: false,
-          sampleRate: 48000
-        }
-      });
+      setRecordingStatus('正在測試系統聲音權限...');
+      console.log('🎵 開始測試系統聲音權限...');
       
-      console.log('系統聲音獲取成功，軌道數:', stream.getAudioTracks().length);
-      return stream;
+      // 檢查 electronAPI 是否可用
+      const electronAPI = (window as any).electronAPI;
+      if (!electronAPI) {
+        console.error('❌ window.electronAPI 未定義');
+        setRecordingStatus('❌ electronAPI 未定義');
+        return false;
+      }
+      
+      console.log('✅ electronAPI 可用，方法:', Object.keys(electronAPI));
+      
+      if (typeof electronAPI.getAudioSources !== 'function') {
+        console.error('❌ electronAPI.getAudioSources 不存在');
+        setRecordingStatus('❌ getAudioSources 方法不存在');
+        return false;
+      }
+      
+      console.log('✅ getAudioSources 方法存在，開始調用...');
+      setRecordingStatus('✅ API 檢查完成，系統聲音功能可用');
+      return true;
+      
     } catch (error) {
-      console.error('系統聲音獲取失敗:', error);
-      return null;
+      console.error('❌ 測試過程錯誤:', error);
+      setRecordingStatus('❌ 測試錯誤：' + (error as Error).message);
+      return false;
     }
+  };
+
+  // 暫時禁用系統聲音錄製以避免崩潰
+  const getSystemAudio = async (): Promise<MediaStream | null> => {
+    console.log('⚠️ 系統聲音錄製暫時禁用，避免應用程式崩潰');
+    console.log('💡 如需系統聲音，請使用麥克風模式錄製');
+    return null;
   };
 
   // 獲取麥克風
@@ -480,14 +497,7 @@ const App: React.FC = () => {
       
       const geminiClient = new GeminiAPIClient(currentSettings.geminiApiKey);
       
-      // 首先測試 API 連接
-      setRecordingStatus('測試 Gemini API 連接...');
-      console.log('🔍 測試 Gemini API 連接，API Key:', currentSettings.geminiApiKey.substring(0, 10) + '...');
-      
-      const connectionTest = await geminiClient.testConnection();
-      if (!connectionTest) {
-        throw new Error('無法連接到 Gemini API，請檢查 API 金鑰是否正確');
-      }
+      // 直接開始轉錄流程，不進行額外的連接測試
       
       // 更新狀態：開始上傳
       updateJob(jobId, { status: 'stt', progress: 10 });
@@ -500,6 +510,9 @@ const App: React.FC = () => {
       // 更新進度
       updateJob(jobId, { progress: 50 });
       setRecordingStatus('檔案上傳完成，開始轉錄...');
+      
+      // 添加延遲以避免請求過於頻繁
+      await new Promise(resolve => setTimeout(resolve, 2000));
       
       // 2. 第一步：生成逐字稿修正
       const mimeType = audioBlob.type || 'audio/webm';
@@ -526,7 +539,11 @@ const App: React.FC = () => {
       // 5. 第二步：生成自訂會議總結（如果有自訂摘要提示詞）
       let finalSummary = parsedResult.summary;
       if (settings.customSummaryPrompt) {
-        setRecordingStatus('逐字稿完成，開始生成自訂摘要...');
+        setRecordingStatus('逐字稿完成，等待後再生成自訂摘要...');
+        
+        // 添加延遲以避免請求過於頻繁
+        await new Promise(resolve => setTimeout(resolve, 3000));
+        setRecordingStatus('開始生成自訂摘要...');
         
         try {
           const customSummaryResult = await geminiClient.generateCustomSummary(
@@ -892,12 +909,29 @@ const App: React.FC = () => {
                   </div>
                 </div>
                 
-                {hasAudioPermission !== true && (
+                <div style={{ display: 'flex', gap: '10px', flexWrap: 'wrap' }}>
+                  {hasAudioPermission !== true && (
+                    <button 
+                      onClick={testAudioAccess}
+                      style={{
+                        padding: '10px 20px',
+                        backgroundColor: '#2563eb',
+                        color: 'white',
+                        borderRadius: '6px',
+                        border: 'none',
+                        cursor: 'pointer',
+                        fontSize: '14px'
+                      }}
+                    >
+                      🎤 測試麥克風權限
+                    </button>
+                  )}
+                  
                   <button 
-                    onClick={testAudioAccess}
+                    onClick={testSystemAudioAccess}
                     style={{
                       padding: '10px 20px',
-                      backgroundColor: '#2563eb',
+                      backgroundColor: '#16a34a',
                       color: 'white',
                       borderRadius: '6px',
                       border: 'none',
@@ -905,9 +939,9 @@ const App: React.FC = () => {
                       fontSize: '14px'
                     }}
                   >
-                    🎤 測試權限
+                    🔊 測試系統聲音權限
                   </button>
-                )}
+                </div>
                 
                 <button 
                   onClick={startRecording}
