@@ -1,6 +1,6 @@
 {
   "name": "meeting-transcription-tool",
-  "version": "1.1.1",
+  "version": "1.1.2",
   "description": "",
   "main": "dist/main/main.js",
   "scripts": {
@@ -79,23 +79,19 @@
           "arch": [
             "x64"
           ]
-        },
-        {
-          "target": "portable",
-          "arch": [
-            "x64"
-          ]
         }
       ],
-      "artifactName": "${productName}-${version}-${target}.${ext}",
-      "forceCodeSigning": false
+      "artifactName": "${productName}-${version}.${ext}",
+      "forceCodeSigning": false,
+      "verifyUpdateCodeSignature": false
     },
     "nsis": {
       "oneClick": false,
       "allowToChangeInstallationDirectory": true,
       "createDesktopShortcut": true,
       "createStartMenuShortcut": true,
-      "shortcutName": "會議轉錄工具"
+      "shortcutName": "會議轉錄工具",
+      "differentialPackage": false
     },
     "publish": {
       "provider": "github",
