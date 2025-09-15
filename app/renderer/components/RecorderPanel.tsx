@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
-import { useRecordingStore, useToastActions } from '../services/store';
+import { useRecordingStore, useToastActions, useSettingsStore } from '../services/store';
 import { DeviceInfo } from '@shared/types';
 import { FLAGS } from '@shared/flags';
 
@@ -28,6 +28,7 @@ export const RecorderPanel: React.FC<RecorderPanelProps> = ({
   } = useRecordingStore();
 
   const { showError, showSuccess } = useToastActions();
+  const { settings } = useSettingsStore();
 
   // Local state
   const [mediaRecorder, setMediaRecorder] = useState<MediaRecorder | null>(null);
@@ -112,9 +113,48 @@ export const RecorderPanel: React.FC<RecorderPanelProps> = ({
         }
       };
 
-      recorder.onstop = () => {
+      recorder.onstop = async () => {
         const audioBlob = new Blob(chunks, { type: 'audio/webm' });
         const duration = recordingState.duration;
+        
+        // Save recording to local file
+        try {
+          const downloadsPath = await window.electronAPI?.app.getPath('downloads');
+          const homePath = await window.electronAPI?.app.getPath('home');
+
+          const pad = (n: number) => String(n).padStart(2, '0');
+          const now = new Date();
+          const ts = `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}-${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`;
+          const filename = `recording-${ts}.webm`;
+
+          // Resolve preferred save directory
+          let baseDir = downloadsPath || '';
+          const pref = settings?.recordingSavePath?.trim() || '';
+          if (pref) {
+            if (pref.startsWith('~/')) {
+              const rest = pref.slice(2).replace(/^\\|\//, '');
+              baseDir = `${homePath}\\${rest}`;
+            } else if (/downloads/i.test(pref)) {
+              baseDir = downloadsPath || baseDir;
+            } else {
+              baseDir = pref;
+            }
+          }
+
+          const saveDir = `${baseDir}\\meeting-recorder`;
+          const savePath = `${saveDir}\\${filename}`;
+
+          const buffer = await audioBlob.arrayBuffer();
+          const result = await window.electronAPI?.recording.saveBlob(savePath, buffer);
+          if (result?.success) {
+            // setAudioFile(savePath); // TODO: Fix this reference
+            showSuccess(`已儲存：${savePath}`);
+          } else {
+            showError('本地儲存失敗：' + (result?.error || '未知錯誤'));
+          }
+        } catch (e) {
+          showError('本地儲存時發生錯誤：' + (e instanceof Error ? e.message : String(e)));
+        }
         
         if (onRecordingComplete) {
           onRecordingComplete(audioBlob, duration);

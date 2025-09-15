@@ -3,11 +3,15 @@ import * as path from 'path';
 import { autoUpdater } from 'electron-updater';
 import { setupRecordingIPC } from './ipc/recording';
 import { setupSystemAudioIPC } from './ipc/system-audio';
+import { initMain } from 'electron-audio-loopback';
 
 class MeetingRecorderApp {
   private mainWindow: BrowserWindow | null = null;
 
   constructor() {
+    // Initialize electron-audio-loopback before app is ready
+    initMain();
+    
     this.initializeApp();
     this.setupAutoUpdater();
   }
@@ -61,11 +65,29 @@ class MeetingRecorderApp {
         nodeIntegration: false,
         contextIsolation: true,
         preload: path.join(__dirname, 'preload.js'),
-        webSecurity: false // 允許外部 API 請求
+        webSecurity: false, // 允許外部 API 請求
+        allowRunningInsecureContent: true,
+        experimentalFeatures: true
       },
       show: false, // Don't show until ready
       titleBarStyle: 'default',
       icon: path.join(__dirname, '../../assets/icon.png'), // Optional icon
+    });
+
+    // Handle permissions for display-capture (needed for system audio)
+    this.mainWindow.webContents.session.setPermissionRequestHandler((webContents, permission, callback) => {
+      console.log('Permission request:', permission);
+      if (permission === 'media') {
+        callback(true); // Allow media permissions for audio/video capture
+      } else {
+        callback(false);
+      }
+    });
+
+    // 設置音頻捕捉權限
+    this.mainWindow.webContents.session.setPermissionCheckHandler((webContents, permission, requestingOrigin, details) => {
+      console.log('Permission check:', permission, 'from:', requestingOrigin);
+      return permission === 'media';
     });
 
     // Load the app
@@ -158,7 +180,8 @@ class MeetingRecorderApp {
         const { desktopCapturer } = require('electron');
         const sources = await desktopCapturer.getSources({
           types: ['screen', 'window'],
-          thumbnailSize: { width: 1, height: 1 }
+          thumbnailSize: { width: 1, height: 1 },
+          fetchWindowIcons: false
         });
         
         console.log('🎵 找到的音訊源:', sources.map((s: any) => ({ id: s.id, name: s.name })));
@@ -166,6 +189,45 @@ class MeetingRecorderApp {
       } catch (error) {
         console.error('❌ 獲取音訊源失敗:', error);
         throw error;
+      }
+    });
+
+    // Loopback audio stream in main process
+    ipcMain.handle('loopback:getAudioStream', async () => {
+      try {
+        console.log('🎵 Main process: 獲取 loopback 音訊流...');
+        const { getLoopbackAudioMediaStream } = require('electron-audio-loopback');
+        const stream = await getLoopbackAudioMediaStream();
+        
+        console.log('🔍 Main process loopbackStream:', stream);
+        console.log('🔍 Main process loopbackStream 類型:', typeof stream);
+        console.log('🔍 Main process loopbackStream constructor:', stream?.constructor?.name);
+        
+        if (stream && typeof stream.getAudioTracks === 'function') {
+          const tracks = stream.getAudioTracks();
+          console.log('✅ Main process: 成功獲取音訊軌道數:', tracks.length);
+          
+          // 序列化 MediaStream 數據供 renderer 使用
+          const serializedStream = {
+            id: stream.id,
+            active: stream.active,
+            tracks: tracks.map((track: MediaStreamTrack) => ({
+              id: track.id,
+              kind: track.kind,
+              label: track.label,
+              enabled: track.enabled,
+              settings: track.getSettings()
+            }))
+          };
+          
+          return { success: true, stream: serializedStream };
+        } else {
+          console.error('❌ Main process: loopback 返回無效對象');
+          return { success: false, error: '無效的 MediaStream' };
+        }
+      } catch (error) {
+        console.error('❌ Main process loopback 錯誤:', error);
+        return { success: false, error: (error as Error).message };
       }
     });
 

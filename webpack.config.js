@@ -19,8 +19,8 @@ module.exports = {
       '@main': path.resolve(__dirname, 'app/main')
     },
     fallback: {
-      "global": false,
-      "process": false
+      "global": require.resolve("./global-polyfill.js"),
+      "process": require.resolve("process/browser")
     }
   },
   module: {

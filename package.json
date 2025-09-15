@@ -1,6 +1,6 @@
 {
   "name": "meeting-transcription-tool",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "",
   "main": "dist/main/main.js",
   "scripts": {
@@ -43,7 +43,10 @@
     "webpack-node-externals": "^3.0.0"
   },
   "dependencies": {
+    "@youngerheart/electron-recorder": "^0.0.0-beta.14",
+    "electron-audio-loopback": "^1.0.6",
     "electron-updater": "^6.6.2",
+    "process": "^0.11.10",
     "react": "^19.1.1",
     "react-dom": "^19.1.1",
     "react-router-dom": "^7.8.2",
@@ -78,7 +81,8 @@
           ]
         }
       ],
-      "artifactName": "${productName}-${version}-Portable.${ext}"
+      "artifactName": "${productName}-${version}-Portable.${ext}",
+      "forceCodeSigning": false
     },
     "nsis": {
       "oneClick": false,
@@ -89,7 +93,7 @@
     },
     "publish": {
       "provider": "github",
-      "owner": "Janus7778",
+      "owner": "Janus77777",
       "repo": "meeting-recorder",
       "private": false
     }

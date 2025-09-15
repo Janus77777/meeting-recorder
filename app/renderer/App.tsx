@@ -198,11 +198,122 @@ const App: React.FC = () => {
     }
   };
 
-  // 暫時禁用系統聲音錄製以避免崩潰
+  // 使用 electron-audio-loopback 錄製系統聲音
   const getSystemAudio = async (): Promise<MediaStream | null> => {
-    console.log('⚠️ 系統聲音錄製暫時禁用，避免應用程式崩潰');
-    console.log('💡 如需系統聲音，請使用麥克風模式錄製');
-    return null;
+    try {
+      console.log('🎵 使用 electron-audio-loopback 獲取系統聲音...');
+
+      // 檢查是否有 loopback API
+      if (!window.electronAPI?.getLoopbackAudioStream) {
+        console.error('❌ getLoopbackAudioStream 函數不可用');
+        return null;
+      }
+
+      try {
+        // 使用 electron-audio-loopback 獲取系統音頻
+        const stream = await window.electronAPI.getLoopbackAudioStream();
+
+        if (stream && stream instanceof MediaStream) {
+          const audioTracks = stream.getAudioTracks();
+
+          if (audioTracks.length > 0) {
+            console.log('🎉 成功使用 electron-audio-loopback 獲取系統音頻！');
+            console.log('🎵 Loopback 音訊軌道:', audioTracks.map(t => ({
+              id: t.id,
+              label: t.label,
+              kind: t.kind,
+              enabled: t.enabled
+            })));
+
+            return stream;
+          } else {
+            console.error('❌ Loopback 音訊流中沒有音訊軌道');
+          }
+        } else {
+          console.error('❌ Loopback 返回無效的音訊流');
+        }
+      } catch (loopbackError) {
+        console.error('❌ electron-audio-loopback 錄製失敗:', loopbackError);
+        console.log('🔄 回退到其他方法...');
+      }
+
+      // 回退方法：檢查虛擬音頻設備
+      console.log('🔄 檢查虛擬音頻設備...');
+
+      const devices = await navigator.mediaDevices.enumerateDevices();
+      const audioInputs = devices.filter(device => device.kind === 'audioinput');
+
+      console.log('🔍 可用音頻設備:', audioInputs.map(d => ({
+        label: d.label,
+        deviceId: d.deviceId.substring(0, 20) + '...'
+      })));
+
+      // 查找立體聲混音或虛擬音頻設備
+      const systemAudioDevice = audioInputs.find(device => {
+        const label = device.label.toLowerCase();
+        return (
+          label.includes('stereo mix') ||
+          label.includes('立體聲混音') ||
+          label.includes('what u hear') ||
+          label.includes('loopback') ||
+          label.includes('cable') ||
+          label.includes('voicemeeter') ||
+          label.includes('virtual')
+        );
+      });
+
+      if (systemAudioDevice) {
+        console.log('✅ 找到系統音頻設備:', systemAudioDevice.label);
+
+        try {
+          const stream = await navigator.mediaDevices.getUserMedia({
+            audio: {
+              deviceId: { exact: systemAudioDevice.deviceId },
+              echoCancellation: false,
+              noiseSuppression: false,
+              autoGainControl: false
+            },
+            video: false
+          });
+
+          const audioTracks = stream.getAudioTracks();
+          if (audioTracks.length > 0) {
+            console.log('🎉 使用系統音頻設備成功！');
+            return stream;
+          }
+        } catch (deviceError) {
+          console.error('❌ 系統音頻設備錄製失敗:', deviceError);
+        }
+      }
+
+      // 最後回退：使用預設麥克風
+      console.log('⚠️ 未找到系統音頻設備，回退到麥克風');
+      console.log('💡 建議啟用 Windows 立體聲混音來支援系統聲音錄製');
+
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({
+          audio: {
+            echoCancellation: false,
+            noiseSuppression: false,
+            autoGainControl: false
+          },
+          video: false
+        });
+
+        const audioTracks = stream.getAudioTracks();
+        if (audioTracks.length > 0) {
+          console.log('🎤 回退到預設麥克風:', audioTracks[0].label);
+          return stream;
+        }
+      } catch (micError) {
+        console.error('❌ 麥克風也無法使用:', micError);
+      }
+
+      return null;
+    } catch (error) {
+      console.error('❌ 系統聲音錄製完全失敗:', error);
+      return null;
+    }
   };
 
   // 獲取麥克風
@@ -263,11 +374,15 @@ const App: React.FC = () => {
       if (recordingMode === 'system' || recordingMode === 'both') {
         setRecordingStatus('正在獲取系統聲音權限...');
         const sysStream = await getSystemAudio();
-        if (sysStream) {
+        if (sysStream && sysStream.getAudioTracks) {
+          console.log('✅ 系統聲音流有效，軌道數:', sysStream.getAudioTracks().length);
           streams.push(sysStream);
           setSystemStream(sysStream);
         } else if (recordingMode === 'system') {
-          throw new Error('無法獲取系統聲音權限');
+          console.error('❌ 系統聲音返回無效的 MediaStream:', sysStream);
+          throw new Error('無法獲取系統聲音權限 - 返回的不是有效的 MediaStream');
+        } else {
+          console.warn('⚠️ 系統聲音獲取失敗，繼續使用麥克風');
         }
       }
       
@@ -283,7 +398,12 @@ const App: React.FC = () => {
         finalStream = streams[0];
       }
       
-      console.log('最終音訊串流，軌道數:', finalStream.getAudioTracks().length);
+      if (finalStream && finalStream.getAudioTracks) {
+        console.log('最終音訊串流，軌道數:', finalStream.getAudioTracks().length);
+      } else {
+        console.error('❌ 最終音訊串流無效:', finalStream);
+        throw new Error('音訊串流合併失敗 - 無效的 MediaStream');
+      }
       
       const recorder = new MediaRecorder(finalStream);
       const chunks: Blob[] = [];
@@ -406,18 +526,44 @@ const App: React.FC = () => {
     URL.revokeObjectURL(audioUrl);
   };
 
-  // 自動保存錄音檔案 - 暫時只保存到應用記憶體
+  // 自動保存錄音檔案
   const saveRecordingFile = async (blob: Blob, filename: string) => {
-    // 暫時不執行實際的檔案下載，避免彈出對話框
-    // 檔案會保存在應用的recordings狀態中，用戶可以稍後手動下載
-    console.log(`錄音檔案 ${filename} 已準備好，將保存到應用記憶體中`);
-    console.log('檔案大小:', blob.size, '位元組');
-    
-    // 將來在 Electron 環境中，這裡可以直接寫入到指定路徑
-    // const savePath = settings.recordingSavePath || '~/Downloads';
-    // 使用 fs.writeFile 或 IPC 調用來直接保存檔案
-    
-    return Promise.resolve();
+    try {
+      console.log(`🎵 開始儲存錄音檔案: ${filename}`);
+      console.log('📁 檔案大小:', blob.size, '位元組');
+
+      // 確定儲存路徑
+      let savePath;
+      if (settings.recordingSavePath && settings.recordingSavePath.trim() !== '' &&
+          !settings.recordingSavePath.startsWith('~')) {
+        savePath = settings.recordingSavePath.trim();
+        console.log('📍 使用設定的儲存路徑:', savePath);
+      } else {
+        savePath = await window.electronAPI.app.getPath('downloads');
+        console.log('📍 使用預設下載路徑:', savePath);
+      }
+
+      // 標準化路徑分隔符為反斜線
+      savePath = savePath.replace(/\//g, '\\');
+      const fullPath = `${savePath}\\${filename}`;
+      console.log('🎯 完整儲存路徑:', fullPath);
+
+      // 轉換為 ArrayBuffer 並儲存
+      console.log('🔄 轉換檔案格式...');
+      const buffer = await blob.arrayBuffer();
+      console.log('💾 開始寫入檔案...');
+
+      const result = await window.electronAPI.recording.saveBlob(fullPath, buffer);
+      console.log('✅ saveBlob 回應:', result);
+
+      console.log('🎉 檔案儲存成功！路徑:', fullPath);
+      return fullPath;
+    } catch (error) {
+      console.error('❌ 檔案儲存過程出錯:', error);
+      console.error('❌ 錯誤詳情:', (error as Error).message);
+      console.error('❌ 錯誤堆疊:', (error as Error).stack);
+      throw error;
+    }
   };
 
   const playRecording = (recording: typeof recordings[0]) => {
