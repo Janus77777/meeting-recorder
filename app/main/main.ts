@@ -251,7 +251,7 @@ class MeetingRecorderApp {
     // 配置更新伺服器
     autoUpdater.setFeedURL({
       provider: 'github',
-      owner: 'Janus7778',
+      owner: 'Janus77777',
       repo: 'meeting-recorder',
       private: false
     });

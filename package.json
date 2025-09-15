@@ -1,6 +1,6 @@
 {
   "name": "meeting-transcription-tool",
-  "version": "1.1.0",
+  "version": "1.1.1",
   "description": "",
   "main": "dist/main/main.js",
   "scripts": {
@@ -75,13 +75,19 @@
     "win": {
       "target": [
         {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        },
+        {
           "target": "portable",
           "arch": [
             "x64"
           ]
         }
       ],
-      "artifactName": "${productName}-${version}-Portable.${ext}",
+      "artifactName": "${productName}-${version}-${target}.${ext}",
       "forceCodeSigning": false
     },
     "nsis": {
