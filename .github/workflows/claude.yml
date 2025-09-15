@@ -1,0 +1,43 @@
+name: Claude Code Action
+
+on:
+  issue_comment:
+    types: [created]
+  pull_request:
+    types: [opened, synchronize, reopened]
+  issues:
+    types: [opened, edited]
+
+jobs:
+  claude-response:
+    runs-on: ubuntu-latest
+    if: |
+      (github.event_name == 'issue_comment' &&
+       (contains(github.event.comment.body, '@claude') ||
+        contains(github.event.comment.body, '/claude'))) ||
+      github.event_name == 'pull_request' ||
+      github.event_name == 'issues'
+
+    permissions:
+      contents: read
+      issues: write
+      pull-requests: write
+
+    steps:
+      - name: Claude Code Action
+        uses: anthropics/claude-code-action@beta
+        with:
+          # 使用 CLAUDE_CODE_OAUTH_TOKEN secret (適用於 Pro/Team 用戶)
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+
+          # 可選配置
+          claude_model: "claude-3-5-sonnet-20241022"
+          max_tokens: 8192
+
+          # 工作目錄設定
+          working_directory: "."
+
+          # 回應配置
+          response_mode: "comment"  # 在 comments 中回應
+          auto_respond: true        # 自動回應符合條件的評論
