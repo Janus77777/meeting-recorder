@@ -1,20 +1,23 @@
 # 會議轉錄工具
 
-一個 Windows 桌面應用程式，能夠錄音、自動轉錄並生成會議摘要。
+一個 Windows 桌面應用程式，能夠錄製音訊、自動轉錄並生成會議摘要。支援麥克風錄音和系統音訊錄製（需搭配虛擬音訊設備）。
 
 ## 功能特色
 
-### MVP 功能（已實作）
+### 核心功能（已實作）
 - ✅ **麥克風錄音**：高品質音訊錄製
-- ✅ **檔案上傳**：整檔上傳至後端服務
+- ✅ **系統音訊偵測**：自動偵測虛擬音訊設備（如 VB-Audio Cable）
+- ✅ **檔案上傳**：整檔上傳至 Gemini 2.5 Pro API
 - ✅ **即時狀態追蹤**：任務狀態輪詢與顯示
 - ✅ **語音轉錄顯示**：包含發言人識別的逐字稿
 - ✅ **智能摘要**：重點摘要、時間軸、待辦事項
-- ✅ **Mock/Real API 切換**：支援測試和正式環境
 - ✅ **Markdown 匯出**：一鍵複製摘要為 Markdown 格式
+- ✅ **音量視覺化**：即時顯示錄音音量
+- ✅ **裝置選擇**：選擇不同的錄音裝置
+- ✅ **通知系統**：操作結果和錯誤提醒
+- ✅ **任務歷史**：本地儲存任務記錄
 
-### 即將推出的功能
-- 🔄 **系統音錄製**：透過 WASAPI 錄製系統播放音訊
+### 開發中功能
 - 🔄 **分段上傳**：支援大檔案斷點續傳
 - 🔄 **品質驗收**：顯示詞錯率和人名校正建議
 - 🔄 **進階匯出**：PDF 和 DOCX 格式匯出
@@ -25,8 +28,10 @@
 - **前端**：Electron + React + TypeScript + Tailwind CSS
 - **狀態管理**：Zustand
 - **打包工具**：Webpack + electron-builder
-- **音訊處理**：MediaRecorder API
+- **音訊處理**：MediaRecorder API + Web Audio API
+- **系統音訊**：electron-audio-loopback + WASAPI
 - **樣式**：Tailwind CSS
+- **API 服務**：Google Gemini 2.5 Pro
 
 ## 快速開始
 
@@ -76,42 +81,63 @@
 1. **設定 API**
    - 前往「設定」頁面
    - 選擇環境（dev/stg/prod）
-   - 輸入 API 基礎網址和金鑰
-   - 或開啟 Mock 模式進行測試
+   - 輸入 Gemini API 基礎網址和金鑰
 
-2. **開始錄音**
-   - 在「錄音」頁面填寫會議標題和參與者
-   - 選擇錄音設備（預設為系統麥克風）
+2. **系統音訊錄製設定（可選）**
+   - 安裝 VB-Audio Virtual Cable 或類似虛擬音訊設備
+   - 應用程式會自動偵測並優先使用虛擬音訊設備
+   - 若無虛擬設備則使用預設麥克風
+
+3. **開始錄音**
+   - 在「錄音」頁面填寬會議標題和參與者
+   - 選擇錄音設備（支援麥克風和系統音訊）
    - 點擊錄音按鈕開始錄製
+   - 可即時查看音量視覺化效果
    - 錄音完成後點擊「開始處理」上傳
 
-3. **查看進度**
+4. **查看進度**
    - 在「任務」頁面查看處理狀態
-   - 狀態包括：排隊中 → 轉錄中 → 摘要中 → 完成
+   - 狀態包括：上傳中 → 轉錄中 → 摘要中 → 完成
+   - 支援任務重試機制
 
-4. **查看結果**
+5. **查看結果**
    - 完成後點擊「查看結果」
    - 可切換「摘要」和「逐字稿」視圖
    - 支援一鍵複製 Markdown 格式
+   - 本地保存任務歷史記錄
 
-### Mock 模式
+### 系統音訊錄製說明
 
-開發和測試時可啟用 Mock 模式：
-- 不需要真實的 API 服務
-- 使用預設的模擬資料
-- 模擬完整的處理流程
+應用程式支援兩種錄音模式：
+- **麥克風錄音**：錄製麥克風輸入
+- **系統音訊錄音**：錄製電腦播放的音訊（需要虛擬音訊設備）
 
-## API 合約
+推薦虛擬音訊設備：
+- VB-Audio Virtual Cable
+- Voicemeeter
+- 其他支援 Stereo Mix 功能的音訊設備
 
-### 後端 API 端點
+## API 整合
 
+### Gemini 2.5 Pro API
+
+應用程式使用 Google Gemini 2.5 Pro API 進行語音轉錄和摘要生成：
+
+```typescript
+// API 端點配置
+const API_ENDPOINTS = {
+  uploadFile: '/v1beta/files',
+  generateContent: '/v1beta/models/gemini-2.5-pro:generateContent',
+  getFile: '/v1beta/files/{name}'
+}
 ```
-POST /api/meetings
-POST /api/meetings/:id/audio
-POST /api/meetings/:id/complete
-GET  /api/meetings/:id/status
-GET  /api/meetings/:id/result
-```
+
+### API 重試機制
+
+- 實作指數退避重試邏輯
+- 最大重試次數：3 次
+- 支援 429（Too Many Requests）和 503（Service Unavailable）錯誤重試
+- 自動處理 API 限流
 
 詳細 API 規格請參考程式碼中的型別定義：`app/shared/types.ts`
 
@@ -182,11 +208,16 @@ meeting-recorder/
 在 `app/shared/flags.ts` 中管理功能開關：
 ```typescript
 export const FLAGS = {
-  SYSTEM_AUDIO: false,   // 系統音錄製
-  AUTO_EMAIL: false,     // 自動寄信
-  ADV_EXPORT: false,     // 進階匯出
-  QUALITY_GATE: false,   // 品質驗收
-  CHUNK_UPLOAD: false    // 分段上傳
+  SYSTEM_AUDIO: false,           // 系統音錄製（開發中）
+  AUTO_EMAIL: false,             // 自動寄信（開發中）
+  ADV_EXPORT: false,             // 進階匯出（開發中）
+  QUALITY_GATE: false,           // 品質驗收（開發中）
+  CHUNK_UPLOAD: false,           // 分段上傳（開發中）
+  DEVICE_SELECTION: true,        // 裝置選擇（已啟用）
+  VOLUME_VISUALIZATION: true,    // 音量視覺化（已啟用）
+  NOTIFICATIONS: true,           // 通知系統（已啟用）
+  JOB_HISTORY: true,             // 任務歷史（已啟用）
+  MARKDOWN_COPY: true            // Markdown 複製（已啟用）
 }
 ```
 
@@ -221,9 +252,9 @@ npm run dist         # 打包 Windows 安裝檔
 
 **2. API 連接失敗**
 - 確認網路連接正常
-- 檢查 API 基礎網址格式
-- 驗證 API 金鑰有效性
-- 嘗試切換到 Mock 模式測試
+- 檢查 Gemini API 基礎網址格式
+- 驗證 Gemini API 金鑰有效性
+- 檢查 API 配額和限流設定
 
 **3. 上傳失敗**
 - 檢查檔案大小（限制 500MB）
@@ -252,7 +283,8 @@ npm run dist         # 打包 Windows 安裝檔
 - 遵循 TypeScript 嚴格模式
 - 使用 ESLint 和 Prettier
 - 新功能需加入適當的 Feature Flag
-- 確保在 Mock 模式下可正常測試
+- 確保錯誤處理和重試機制完善
+- 音訊功能需在多種設備上測試
 
 ## 授權
 
@@ -264,7 +296,7 @@ npm run dist         # 打包 Windows 安裝檔
 
 ---
 
-## Demo 腳本
+## Demo 流程
 
 ### 基本示範流程
 
@@ -273,22 +305,36 @@ npm run dist         # 打包 Windows 安裝檔
    npm run dev
    ```
 
-2. **Mock 模式示範**
+2. **設定 API**
    - 前往「設定」頁面
-   - 確認已開啟 Mock 模式
-   - 返回「錄音」頁面
+   - 輸入 Gemini API 金鑰和端點
+   - 確認連線狀態
 
 3. **錄音示範**
    - 輸入會議標題：「產品規劃會議」
    - 輸入參與者：「張經理, 李工程師, 王設計師」
-   - 開始錄音 10 秒
+   - 選擇錄音設備（麥克風或系統音訊）
+   - 觀察音量視覺化效果
+   - 開始錄音 10-30 秒
    - 停止錄音並上傳
 
 4. **查看結果**
    - 前往「任務」頁面查看處理狀態
-   - 等待狀態變更為「完成」
+   - 觀察狀態變更：上傳中 → 轉錄中 → 摘要中 → 完成
    - 點擊「查看結果」
    - 展示摘要和逐字稿功能
    - 測試 Markdown 複製功能
+   - 查看任務歷史記錄
 
-此 MVP 版本提供了完整的會議錄音轉錄解決方案核心功能，後續版本將逐步加入更多進階功能。
+### 系統音訊錄製示範
+
+1. **安裝虛擬音訊設備**（可選）
+   - 下載並安裝 VB-Audio Virtual Cable
+   - 重新啟動應用程式
+
+2. **測試系統音訊錄製**
+   - 播放音樂或影片
+   - 應用程式會自動偵測虛擬音訊設備
+   - 進行錄音測試，確認可錄製系統播放的音訊
+
+此版本提供了完整的會議錄音轉錄解決方案，整合 Gemini 2.5 Pro API 進行高品質轉錄和摘要，後續版本將持續優化系統音訊錄製功能並加入更多進階功能。
