@@ -58,6 +58,7 @@ export interface MeetingSummary {
 export interface ResultResponse {
   transcript: {
     segments: TranscriptSegment[];
+    fullText?: string;
   };
   summary: MeetingSummary;
   meta: {

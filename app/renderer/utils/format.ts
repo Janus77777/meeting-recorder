@@ -122,7 +122,10 @@ export const generateMarkdown = (
   if (transcript.length > 0) {
     markdown += `## 完整轉錄\n\n`;
     transcript.forEach(segment => {
-      markdown += `**${segment.speaker}** (${formatDuration(segment.start)}): ${segment.text}\n\n`;
+      const startTime = typeof segment.start === 'string' ?
+        parseInt(segment.start.split(':')[0]) * 60 + parseInt(segment.start.split(':')[1]) :
+        segment.start;
+      markdown += `**${segment.speaker}** (${formatDuration(startTime)}): ${segment.text}\n\n`;
     });
   }
 
