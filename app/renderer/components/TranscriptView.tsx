@@ -1,26 +1,72 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { TranscriptSegment } from '@shared/types';
 
 interface TranscriptViewProps {
   segments: TranscriptSegment[];
+  fullText?: string;
   className?: string;
   showTimestamps?: boolean;
   searchQuery?: string;
+  onSpeakerNameChange?: (oldName: string, newName: string) => void;
 }
 
 export const TranscriptView: React.FC<TranscriptViewProps> = ({
   segments,
+  fullText,
   className = '',
   showTimestamps = true,
-  searchQuery = ''
+  searchQuery = '',
+  onSpeakerNameChange
 }) => {
   const [selectedSpeaker, setSelectedSpeaker] = useState<string | null>(null);
+  const [editingSpeaker, setEditingSpeaker] = useState<string | null>(null);
+  const [editedName, setEditedName] = useState<string>('');
+  const [speakerMap, setSpeakerMap] = useState<Map<string, string>>(new Map());
 
-  // Format time for display
-  const formatTime = (seconds: number): string => {
-    const mins = Math.floor(seconds / 60);
-    const secs = Math.floor(seconds % 60);
+  // Format time for display - handle both number and string formats
+  const formatTime = (time: number | string): string => {
+    // If it's already a string in MM:SS format, return it
+    if (typeof time === 'string') {
+      return time;
+    }
+
+    // If it's a number, convert to MM:SS format
+    const mins = Math.floor(time / 60);
+    const secs = Math.floor(time % 60);
     return `${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
+  };
+
+  // Get display name for speaker
+  const getDisplayName = (speaker: string): string => {
+    return speakerMap.get(speaker) || speaker;
+  };
+
+  // Handle speaker name edit
+  const handleSpeakerEdit = (speaker: string) => {
+    setEditingSpeaker(speaker);
+    setEditedName(getDisplayName(speaker));
+  };
+
+  // Save edited speaker name
+  const saveSpeakerName = () => {
+    if (editingSpeaker && editedName && editedName !== editingSpeaker) {
+      const newMap = new Map(speakerMap);
+      newMap.set(editingSpeaker, editedName);
+      setSpeakerMap(newMap);
+
+      // Notify parent component
+      if (onSpeakerNameChange) {
+        onSpeakerNameChange(editingSpeaker, editedName);
+      }
+    }
+    setEditingSpeaker(null);
+    setEditedName('');
+  };
+
+  // Cancel editing
+  const cancelEdit = () => {
+    setEditingSpeaker(null);
+    setEditedName('');
   };
 
   // Get unique speakers
@@ -69,6 +115,22 @@ export const TranscriptView: React.FC<TranscriptViewProps> = ({
     return colors[index];
   };
 
+  // 如果沒有 segments 但有 fullText，顯示純文字內容
+  if (segments.length === 0 && fullText) {
+    return (
+      <div className={`bg-white rounded-lg shadow-sm ${className}`}>
+        <div className="p-4">
+          <div className="whitespace-pre-wrap text-gray-800 leading-relaxed">
+            {fullText}
+          </div>
+        </div>
+        <div className="px-4 py-3 bg-gray-50 border-t border-gray-200 text-xs text-gray-500">
+          純文字格式轉錄
+        </div>
+      </div>
+    );
+  }
+
   if (segments.length === 0) {
     return (
       <div className={`text-center py-8 text-gray-500 ${className}`}>
@@ -106,7 +168,7 @@ export const TranscriptView: React.FC<TranscriptViewProps> = ({
                     : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
                 }`}
               >
-                {speaker}
+                {getDisplayName(speaker)}
               </button>
             ))}
           </div>
@@ -134,8 +196,53 @@ export const TranscriptView: React.FC<TranscriptViewProps> = ({
                 )}
 
                 {/* Speaker */}
-                <div className={`flex-shrink-0 font-semibold text-sm pt-1 w-20 ${getSpeakerColor(segment.speaker)}`}>
-                  {segment.speaker}
+                <div className={`flex-shrink-0 font-semibold text-sm pt-1 min-w-[120px] flex items-center gap-1 ${getSpeakerColor(segment.speaker)}`}>
+                  {editingSpeaker === segment.speaker ? (
+                    <div className="flex items-center gap-1">
+                      <input
+                        type="text"
+                        value={editedName}
+                        onChange={(e) => setEditedName(e.target.value)}
+                        onKeyDown={(e) => {
+                          if (e.key === 'Enter') saveSpeakerName();
+                          if (e.key === 'Escape') cancelEdit();
+                        }}
+                        className="w-24 px-1 py-0 text-sm border rounded focus:outline-none focus:ring-1 focus:ring-blue-500"
+                        autoFocus
+                      />
+                      <button
+                        onClick={saveSpeakerName}
+                        className="text-green-600 hover:text-green-700"
+                        title="儲存"
+                      >
+                        <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
+                        </svg>
+                      </button>
+                      <button
+                        onClick={cancelEdit}
+                        className="text-red-600 hover:text-red-700"
+                        title="取消"
+                      >
+                        <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                        </svg>
+                      </button>
+                    </div>
+                  ) : (
+                    <div className="flex items-center gap-1 group">
+                      <span>{getDisplayName(segment.speaker)}</span>
+                      <button
+                        onClick={() => handleSpeakerEdit(segment.speaker)}
+                        className="opacity-0 group-hover:opacity-100 text-gray-400 hover:text-gray-600 transition-opacity"
+                        title="編輯名稱"
+                      >
+                        <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15.232 5.232l3.536 3.536m-2.036-5.036a2.5 2.5 0 113.536 3.536L6.5 21.036H3v-3.572L16.732 3.732z" />
+                        </svg>
+                      </button>
+                    </div>
+                  )}
                 </div>
 
                 {/* Text */}
@@ -164,7 +271,7 @@ export const TranscriptView: React.FC<TranscriptViewProps> = ({
           <span> • 搜尋："{searchQuery}"</span>
         )}
         {selectedSpeaker && (
-          <span> • 發言人：{selectedSpeaker}</span>
+          <span> • 發言人：{getDisplayName(selectedSpeaker)}</span>
         )}
       </div>
     </div>

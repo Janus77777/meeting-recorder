@@ -312,40 +312,40 @@ class GeminiAPIClient {
     throw lastError;
   }
 
-  // 生成轉錄內容  
-  async generateTranscription(fileUri: string, mimeType?: string, customPrompt?: string, vocabularyList?: any[]): Promise<string> {
+  // 生成轉錄內容
+  async generateTranscription(fileUri: string, mimeType?: string, customPrompt?: string, vocabularyList?: any[], participants?: string[]): Promise<string> {
     const generateUrl = `${this.baseURL}/models/gemini-2.5-pro:generateContent?key=${this.apiKey}`;
-    
+
     // 引入詞彙表服務
     const { VocabularyService } = await import('./vocabularyService');
-    
-    const defaultPrompt = `請詳細轉錄這個音訊檔案的內容。請包含：
 
-1. 完整的文字轉錄
-2. 每個段落的時間戳記（如果可能的話）  
-3. 不同說話者的識別（例如：說話者1、說話者2）
-4. 會議的重點摘要
-5. 重要的討論要點和決議
+    // 構建參與者名單提示
+    let participantsPrompt = '';
+    if (participants && participants.length > 0) {
+      participantsPrompt = `\n\n會議參與者名單：${participants.join('、')}`;
+    }
 
-請用以下 JSON 格式回應：
-{
-  "transcript": {
-    "segments": [
-      {
-        "start": "00:00:00",
-        "end": "00:00:10", 
-        "speaker": "說話者1",
-        "text": "轉錄內容..."
-      }
-    ]
-  },
-  "summary": {
-    "highlights": ["重點1", "重點2"],
-    "key_decisions": ["決議1", "決議2"], 
-    "action_items": ["待辦事項1", "待辦事項2"],
-    "overall_summary": "會議整體摘要..."
-  }
-}`;
+    const defaultPrompt = `請使用 Google Cloud Speech-to-Text v2 的 USM（Chirp/Chirp 2）模型對本音訊做語音轉文字，啟用說話者分段（speaker diarization）與字詞級時間戳（word time offsets）；僅輸出一個 <pre> 區塊，不要任何前後解說或 JSON。
+
+輸出規格：
+1. 第 1 行輸出「# Legend: 」後接目前可判斷的映射（例：Speaker 1=阿明, Speaker 2=小美）。
+2. 其後每段對話一行，格式：「[姓名|Speaker N]: 文字」。
+3. 姓名推斷規則：
+   - 遇到「自我介紹」語句（如「我是/我叫/我的名字是/This is/I'm + 名字」）時，將當前 Speaker N 映射為該姓名。
+   - 若對話出現點名呼喚（如「阿明你看…」）且緊接的回覆為第一人稱陳述，將該回覆的 Speaker N 映射為被呼喚的姓名。
+   - 持續沿用已建立的映射，除非出現明確更正（如「不是我，是小美說的」）。
+   - 若同名多位，請使用「姓名(1)、姓名(2)」區分。
+   - 若信心不足，輸出「Speaker N (可能是姓名)」。
+   - 不得憑空創造未在音訊中明示或可合理推斷的姓名；若無線索則保留「Speaker N」。
+4. 長句請在語義自然處換行為多段行輸出避免過長。${participantsPrompt}
+
+必要設定（由系統/連接器帶入即可）：
+- model=chirp 或 chirp_2
+- enable_speaker_diarization=true
+- enable_word_time_offsets=true
+- language=zh-TW
+- min_speaker_count=1
+- max_speaker_count=8`;
 
     // 構建最終提示詞，包含詞彙表
     let finalPrompt = customPrompt || defaultPrompt;
@@ -379,7 +379,7 @@ class GeminiAPIClient {
         topK: 40,
         topP: 0.95,
         maxOutputTokens: 8192,
-        responseMimeType: "application/json"
+        responseMimeType: "text/plain"
       }
     };
 
@@ -474,11 +474,12 @@ ${customPrompt}`;
     });
   }
 
-  // 解析 Gemini 回應的 JSON 格式
-  parseTranscriptionResult(jsonText: string) {
+  // 解析 Gemini 回應（支援 JSON 和純文字格式）
+  parseTranscriptionResult(responseText: string) {
     try {
-      const parsed = JSON.parse(jsonText);
-      
+      // 嘗試解析為 JSON（向後相容性）
+      const parsed = JSON.parse(responseText);
+
       return {
         transcript: {
           segments: parsed.transcript?.segments || [],
@@ -494,21 +495,30 @@ ${customPrompt}`;
         }
       };
     } catch (error) {
-      console.warn('無法解析 Gemini JSON 回應，使用原始文本:', error);
-      
-      // 如果 JSON 解析失敗，嘗試提取文本內容
+      // JSON 解析失敗，當作純文字處理
+      console.log('處理純文字格式轉錄結果');
+
+      // 處理純文字格式，正確解析換行
+      let cleanText = responseText.trim();
+
+      // 將 \n 轉換為實際換行，並清理格式
+      cleanText = cleanText
+        .replace(/\\n/g, '\n')  // 處理轉義的換行符
+        .replace(/\n\s*\n/g, '\n\n')  // 清理多餘空行
+        .replace(/\n/g, '\n\n');  // 確保段落間有空行
+
       return {
         transcript: {
           segments: [],
-          fullText: jsonText,
+          fullText: cleanText,
           corrections: []
         },
         summary: {
           highlights: [],
           keyDecisions: [],
           actionItems: [],
-          overallSummary: jsonText,
-          minutesMd: `# 會議記錄\n\n${jsonText}`
+          overallSummary: '',
+          minutesMd: `# 會議記錄\n\n${cleanText}`
         }
       };
     }

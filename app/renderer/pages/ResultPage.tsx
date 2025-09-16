@@ -17,6 +17,7 @@ export const ResultPage: React.FC = () => {
   const [activeView, setActiveView] = useState<'transcript' | 'summary'>('summary');
   const [searchQuery, setSearchQuery] = useState('');
   const [isLoading, setIsLoading] = useState(false);
+  const [speakerNameMap, setSpeakerNameMap] = useState<Map<string, string>>(new Map());
 
   // Redirect if no current job
   useEffect(() => {
@@ -66,6 +67,34 @@ export const ResultPage: React.FC = () => {
   // Handle export (placeholder for future features)
   const handleExport = (format: 'pdf' | 'docx') => {
     showInfo(`${format.toUpperCase()} 匯出功能即將推出`);
+  };
+
+  // Handle speaker name change
+  const handleSpeakerNameChange = (oldName: string, newName: string) => {
+    if (!currentJob?.result) return;
+
+    // Update local state
+    const newMap = new Map(speakerNameMap);
+    newMap.set(oldName, newName);
+    setSpeakerNameMap(newMap);
+
+    // Update the segments in the result
+    const updatedSegments = currentJob.result.transcript.segments.map(segment => ({
+      ...segment,
+      speaker: segment.speaker === oldName ? newName : segment.speaker
+    }));
+
+    // Update the job with modified result
+    const updatedResult = {
+      ...currentJob.result,
+      transcript: {
+        ...currentJob.result.transcript,
+        segments: updatedSegments
+      }
+    };
+
+    updateJob(currentJob.id, { result: updatedResult });
+    showSuccess(`說話者名稱已更新：${oldName} → ${newName}`);
   };
 
   // If no job selected
@@ -165,8 +194,12 @@ export const ResultPage: React.FC = () => {
             <div className="flex items-center gap-4 text-sm text-gray-500 mt-2">
               <span>📅 {formatDate(result.meta.createdAt)}</span>
               <span>👥 {result.meta.participants.join('、')}</span>
-              <span>⏱️ {result.transcript.segments.length > 0 ? 
-                formatDuration(Math.max(...result.transcript.segments.map(s => s.end))) : '無'}</span>
+              <span>⏱️ {result.transcript.segments.length > 0 ?
+                formatDuration(Math.max(...result.transcript.segments.map(s =>
+                  typeof s.end === 'string' ?
+                    parseInt(s.end.split(':')[0]) * 60 + parseInt(s.end.split(':')[1]) :
+                    s.end
+                ))) : '無'}</span>
             </div>
           </div>
           
@@ -276,7 +309,7 @@ export const ResultPage: React.FC = () => {
               >
                 <option value="">匯出為...</option>
                 <option value="pdf">PDF</option>
-                <option value="docx">Word</option>
+                <option value="docx">Word (功能開發中)</option>
               </select>
             </FlagGuard>
           </div>
@@ -295,8 +328,10 @@ export const ResultPage: React.FC = () => {
           ) : (
             <TranscriptView
               segments={result.transcript.segments}
+              fullText={result.transcript.fullText}
               searchQuery={searchQuery}
               showTimestamps={true}
+              onSpeakerNameChange={handleSpeakerNameChange}
             />
           )}
         </div>

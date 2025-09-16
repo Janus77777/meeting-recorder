@@ -30,8 +30,8 @@ export interface StatusResponse {
 }
 
 export interface TranscriptSegment {
-  start: number;
-  end: number;
+  start: number | string;  // Support both seconds (number) and MM:SS format (string)
+  end: number | string;    // Support both seconds (number) and MM:SS format (string)
   speaker: string;
   text: string;
 }

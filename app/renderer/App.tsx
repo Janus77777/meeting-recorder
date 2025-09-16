@@ -1603,7 +1603,7 @@ const App: React.FC = () => {
                   gap: '0.5rem'
                 }}
               >
-                💾 下載Word
+                💾 下載文字檔 (TXT)
               </button>
               
               <button
