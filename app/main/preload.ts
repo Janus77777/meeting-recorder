@@ -1,5 +1,4 @@
 import { contextBridge, ipcRenderer } from 'electron';
-import { getLoopbackAudioMediaStream } from 'electron-audio-loopback';
 
 // Define the API that will be exposed to the renderer process
 export interface ElectronAPI {
@@ -40,9 +39,6 @@ export interface ElectronAPI {
 
   // Desktop capturer for system audio
   getAudioSources: () => Promise<any>;
-  
-  // Loopback audio stream
-  getLoopbackAudioStream: () => Promise<MediaStream | null>;
 
   // Auto-updater methods
   updater: {
@@ -62,6 +58,7 @@ export interface ElectronAPI {
       total: number;
       bytesPerSecond: number;
     }) => void) => void;
+    onUpdateDownloaded: (callback: (info: { version: string }) => void) => void;
   };
 
   // Development helpers (only in development)
@@ -115,28 +112,15 @@ const electronAPI: ElectronAPI = {
     onUpdateProgress: (callback) => {
       ipcRenderer.removeAllListeners('update-progress');
       ipcRenderer.on('update-progress', (event, progress) => callback(progress));
+    },
+    onUpdateDownloaded: (callback) => {
+      ipcRenderer.removeAllListeners('update-downloaded');
+      ipcRenderer.on('update-downloaded', (event, info) => callback(info));
     }
   },
 
   getAudioSources: () => ipcRenderer.invoke('desktopCapturer:getAudioSources'),
   
-  getLoopbackAudioStream: async () => {
-    try {
-      const result = await ipcRenderer.invoke('loopback:getAudioStream');
-      if (result.success) {
-        console.log('✅ Renderer: 從 main process 獲取序列化音訊流:', result.stream);
-        // 這裡我們只能返回序列化的數據，不是真正的 MediaStream
-        // 需要在 renderer 中用其他方式處理
-        return result.stream;
-      } else {
-        console.error('❌ Renderer: main process 錯誤:', result.error);
-        return null;
-      }
-    } catch (error) {
-      console.error('❌ Renderer: loopback IPC 失敗:', error);
-      return null;
-    }
-  }
 };
 
 // Add development helpers in development mode

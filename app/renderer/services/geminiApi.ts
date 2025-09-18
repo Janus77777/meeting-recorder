@@ -13,22 +13,55 @@ interface GeminiFileUploadResponse {
   uri: string;
 }
 
-interface GeminiGenerateContentResponse {
-  candidates: Array<{
-    content: {
-      parts: Array<{
-        text: string;
-      }>;
-      role: string;
-    };
-    finishReason: string;
-    index: number;
+interface GeminiContentPart {
+  text?: string;
+  inlineData?: {
+    mimeType: string;
+    data: string;
+  };
+  fileData?: {
+    mimeType?: string;
+    fileUri: string;
+  };
+}
+
+interface GeminiCandidateContent {
+  parts?: GeminiContentPart[];
+  role?: string;
+}
+
+interface GeminiCandidate {
+  content?: GeminiCandidateContent;
+  finishReason?: string;
+  index?: number;
+  safetyRatings?: Array<{
+    category: string;
+    probability: string;
   }>;
+}
+
+interface GeminiGenerateContentResponse {
+  candidates?: GeminiCandidate[];
   promptFeedback?: {
     blockReason?: string;
     safetyRatings?: Array<{
       category: string;
       probability: string;
+      severity?: string;
+    }>;
+  };
+  usageMetadata?: {
+    promptTokenCount?: number;
+    totalTokenCount?: number;
+    candidatesTokenCount?: number;
+    thoughtsTokenCount?: number;
+    promptTokensDetails?: Array<{
+      modality?: string;
+      tokenCount?: number;
+    }>;
+    candidatesTokensDetails?: Array<{
+      modality?: string;
+      tokenCount?: number;
     }>;
   };
 }
@@ -302,18 +335,96 @@ class GeminiAPIClient {
           }
         }
         
-        // 對於非 503/429 錯誤，或者已經達到最大重試次數，拋出錯誤
+        // 對於非 503/429 錯誤直接停止重試
+        if (!error.message || (!error.message.includes('503') && !error.message.includes('429'))) {
+          throw lastError;
+        }
+
         if (attempt >= maxRetries) {
           throw lastError;
         }
       }
     }
-    
+
     throw lastError;
   }
 
+  private extractTextFromResponse(result: GeminiGenerateContentResponse, context: string): string {
+    if (!result) {
+      throw new Error(`Gemini ${context} 回傳為空`);
+    }
+
+    if (result.promptFeedback?.blockReason) {
+      const ratings = result.promptFeedback.safetyRatings
+        ?.map(rating => `${rating.category}:${rating.probability}`)
+        .join(', ');
+      const details = ratings ? `（安全等級：${ratings}）` : '';
+      throw new Error(`Gemini ${context} 被安全性機制阻擋：${result.promptFeedback.blockReason}${details}`);
+    }
+
+    const candidates = result.candidates ?? [];
+    if (!candidates.length) {
+      throw new Error(`Gemini ${context} 回傳空的候選內容`);
+    }
+
+    const candidateWithText = candidates.find(candidate =>
+      candidate?.content?.parts?.some(part => typeof part?.text === 'string' && part.text.trim().length > 0)
+    );
+
+    if (!candidateWithText) {
+      const cappedCandidate = candidates.find(candidate => candidate.finishReason === 'MAX_TOKENS');
+      if (cappedCandidate) {
+        const promptTokens = result.usageMetadata?.promptTokenCount;
+        const totalTokens = result.usageMetadata?.totalTokenCount;
+        const details: string[] = [];
+        if (typeof promptTokens === 'number') {
+          details.push(`提示耗用 ${promptTokens} tokens`);
+        }
+        if (typeof totalTokens === 'number') {
+          details.push(`總計 ${totalTokens} tokens`);
+        }
+        const detailText = details.length ? `（${details.join('，')}）` : '';
+        throw new Error(`Gemini ${context} 輸出超過模型上限（finishReason=MAX_TOKENS）${detailText}，請縮短音訊長度或調整提示詞降低輸出需求。`);
+      }
+
+      const finishReasons = candidates
+        .map(candidate => candidate.finishReason)
+        .filter(Boolean)
+        .join(', ') || '未知';
+
+      console.warn(`Gemini ${context} 回應未包含文字內容:`, JSON.stringify(result, null, 2));
+      throw new Error(`Gemini ${context} 回應未包含文字內容（finishReason: ${finishReasons}）`);
+    }
+
+    if (candidateWithText.finishReason && candidateWithText.finishReason !== 'STOP') {
+      console.warn(`Gemini ${context} finishReason: ${candidateWithText.finishReason}`);
+    }
+
+    const textParts = candidateWithText.content?.parts
+      ?.map(part => (typeof part?.text === 'string' ? part.text.trim() : ''))
+      .filter(part => part.length > 0);
+
+    if (!textParts || textParts.length === 0) {
+      console.warn(`Gemini ${context} 候選內容不包含文字部分:`, JSON.stringify(candidateWithText, null, 2));
+      throw new Error(`Gemini ${context} 回應的文字部分為空`);
+    }
+
+    return textParts.join('\n').trim();
+  }
+
   // 生成轉錄內容
-  async generateTranscription(fileUri: string, mimeType?: string, customPrompt?: string, vocabularyList?: any[], participants?: string[]): Promise<string> {
+  async generateTranscription(
+    fileUri: string,
+    mimeType?: string,
+    customPrompt?: string,
+    vocabularyList?: any[],
+    segmentContext?: {
+      index: number;
+      total: number;
+      startTime: number;
+      endTime: number;
+    }
+  ): Promise<string> {
     const generateUrl = `${this.baseURL}/models/gemini-2.5-pro:generateContent?key=${this.apiKey}`;
 
     // 引入詞彙表服務
@@ -321,9 +432,6 @@ class GeminiAPIClient {
 
     // 構建參與者名單提示
     let participantsPrompt = '';
-    if (participants && participants.length > 0) {
-      participantsPrompt = `\n\n會議參與者名單：${participants.join('、')}`;
-    }
 
     const defaultPrompt = `請使用 Google Cloud Speech-to-Text v2 的 USM（Chirp/Chirp 2）模型對本音訊做語音轉文字，啟用說話者分段（speaker diarization）與字詞級時間戳（word time offsets）；僅輸出一個 <pre> 區塊，不要任何前後解說或 JSON。
 
@@ -349,13 +457,25 @@ class GeminiAPIClient {
 
     // 構建最終提示詞，包含詞彙表
     let finalPrompt = customPrompt || defaultPrompt;
+    if (participantsPrompt) {
+      finalPrompt += participantsPrompt;
+    }
     
     // 如果有詞彙表，將其加入提示詞中
     if (vocabularyList && vocabularyList.length > 0) {
       const vocabularyPrompt = VocabularyService.formatVocabularyForPrompt(vocabularyList);
       finalPrompt = finalPrompt + vocabularyPrompt;
     }
-    
+
+    if (segmentContext && segmentContext.total > 1) {
+      const formatTime = (seconds: number) => {
+        const mins = Math.floor(seconds / 60);
+        const secs = Math.floor(seconds % 60);
+        return `${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
+      };
+      finalPrompt += `\n\n【重要】此音訊為整場會議的第 ${segmentContext.index + 1}/${segmentContext.total} 段，時間約 ${formatTime(segmentContext.startTime)} 至 ${formatTime(segmentContext.endTime)}。請延續同一份會議的說話人標記，不要重複前一段內容，也不要摘要其他段落。`;
+    }
+
     const prompt = finalPrompt;
 
     const requestBody = {
@@ -404,11 +524,7 @@ class GeminiAPIClient {
       const result: GeminiGenerateContentResponse = await response.json();
       console.log('Gemini 轉錄回應:', result);
 
-      if (!result.candidates || result.candidates.length === 0) {
-        throw new Error('Gemini API 沒有回傳轉錄結果');
-      }
-
-      const transcriptText = result.candidates[0].content.parts[0].text;
+      const transcriptText = this.extractTextFromResponse(result, '轉錄');
       return transcriptText;
     });
   }
@@ -465,11 +581,7 @@ ${customPrompt}`;
       const result: GeminiGenerateContentResponse = await response.json();
       console.log('Gemini 自訂摘要回應:', result);
 
-      if (!result.candidates || result.candidates.length === 0) {
-        throw new Error('Gemini API 沒有回傳摘要結果');
-      }
-
-      const summaryText = result.candidates[0].content.parts[0].text;
+      const summaryText = this.extractTextFromResponse(result, '自訂摘要');
       return summaryText;
     });
   }

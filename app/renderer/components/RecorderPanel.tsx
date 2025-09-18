@@ -2,6 +2,7 @@ import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { useRecordingStore, useToastActions, useSettingsStore } from '../services/store';
 import { DeviceInfo } from '@shared/types';
 import { FLAGS } from '@shared/flags';
+import { joinPath, normalizePath } from '@renderer/utils/path';
 
 interface RecorderPanelProps {
   onRecordingComplete?: (audioBlob: Blob, duration: number) => void;
@@ -129,11 +130,12 @@ export const RecorderPanel: React.FC<RecorderPanelProps> = ({
 
           // Resolve preferred save directory
           let baseDir = downloadsPath || '';
-          const pref = settings?.recordingSavePath?.trim() || '';
-          if (pref) {
+          const pref = settings?.recordingSavePath?.trim();
+
+          if (pref && pref.length > 0) {
             if (pref.startsWith('~/')) {
-              const rest = pref.slice(2).replace(/^\\|\//, '');
-              baseDir = `${homePath}\\${rest}`;
+              const relative = pref.slice(2);
+              baseDir = joinPath(homePath || '', relative);
             } else if (/downloads/i.test(pref)) {
               baseDir = downloadsPath || baseDir;
             } else {
@@ -141,14 +143,15 @@ export const RecorderPanel: React.FC<RecorderPanelProps> = ({
             }
           }
 
-          const saveDir = `${baseDir}\\meeting-recorder`;
-          const savePath = `${saveDir}\\${filename}`;
+          const saveDir = joinPath(baseDir, 'meeting-recorder');
+          const savePath = joinPath(saveDir, filename);
 
           const buffer = await audioBlob.arrayBuffer();
-          const result = await window.electronAPI?.recording.saveBlob(savePath, buffer);
+          const normalizedSavePath = normalizePath(savePath);
+          const result = await window.electronAPI?.recording.saveBlob(normalizedSavePath, buffer);
           if (result?.success) {
             // setAudioFile(savePath); // TODO: Fix this reference
-            showSuccess(`已儲存：${savePath}`);
+            showSuccess(`已儲存：${normalizedSavePath}`);
           } else {
             showError('本地儲存失敗：' + (result?.error || '未知錯誤'));
           }

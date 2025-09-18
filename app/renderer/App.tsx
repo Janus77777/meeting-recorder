@@ -6,6 +6,8 @@ import { AppSettings } from '@shared/types';
 import { useSettingsStore, useUIStore, useJobsStore, initializeStores } from './services/store';
 import PromptsPage from './pages/PromptsPage';
 import { VocabularyService } from './services/vocabularyService';
+import { mergeMediaStreams, requestMicrophoneStream, requestSystemAudioStream, stopStream } from './utils/audioCapture';
+import { joinPath, normalizePath } from './utils/path';
 
 const App: React.FC = () => {
   // 使用UI store管理頁面狀態
@@ -26,6 +28,7 @@ const App: React.FC = () => {
     timestamp: string;
     duration: number;
     size: number;
+    chunks?: Blob[];
   }>>([]);
   
   // 使用 Zustand store 管理設定和作業
@@ -48,6 +51,122 @@ const App: React.FC = () => {
   const [updateAvailable, setUpdateAvailable] = useState(false);
   const [updateInfo, setUpdateInfo] = useState<{ version: string; releaseNotes?: string } | null>(null);
   const [updateProgress, setUpdateProgress] = useState<{ percent: number; status: string } | null>(null);
+  const [updateDownloaded, setUpdateDownloaded] = useState(false);
+  const [appVersion, setAppVersion] = useState<string>('');
+  const [platform, setPlatform] = useState<NodeJS.Platform | 'unknown'>('unknown');
+
+  type AudioSegment = {
+    index: number;
+    blob: Blob;
+    start: number;
+    end: number;
+    duration: number;
+  };
+
+  const MAX_SEGMENT_DURATION_SECONDS = 360; // 6 分鐘
+  const MIN_SEGMENT_DURATION_SECONDS = 90;  // 1.5 分鐘，避免最後一段過短
+
+  const createAudioSegments = (
+    fullBlob: Blob,
+    chunkList: Blob[] = [],
+    totalDuration: number = recordingTime
+  ): AudioSegment[] => {
+    if (!chunkList || chunkList.length === 0 || !Number.isFinite(totalDuration) || totalDuration <= 0) {
+      return [{ index: 0, blob: fullBlob, start: 0, end: totalDuration > 0 ? totalDuration : 0, duration: totalDuration > 0 ? totalDuration : 0 }];
+    }
+
+    const chunkCount = chunkList.length;
+    const approxChunkDuration = totalDuration / chunkCount || 1;
+    const maxChunksPerSegment = Math.max(1, Math.round(MAX_SEGMENT_DURATION_SECONDS / approxChunkDuration));
+
+    const segments: AudioSegment[] = [];
+    let currentChunks: Blob[] = [];
+    let segmentStartIndex = 0;
+
+    const pushSegment = (endIndexExclusive: number) => {
+      if (currentChunks.length === 0) {
+        return;
+      }
+
+      const startTime = segmentStartIndex * approxChunkDuration;
+      const chunkSpan = currentChunks.length * approxChunkDuration;
+      const endTime = Math.min(totalDuration, startTime + chunkSpan);
+      const duration = Math.max(endTime - startTime, approxChunkDuration);
+
+      const segmentBlob = new Blob(currentChunks, { type: fullBlob.type || 'audio/webm' });
+      segments.push({
+        index: segments.length,
+        blob: segmentBlob,
+        start: startTime,
+        end: endTime,
+        duration
+      });
+
+      currentChunks = [];
+      segmentStartIndex = endIndexExclusive;
+    };
+
+    chunkList.forEach((chunk, idx) => {
+      currentChunks.push(chunk);
+      const isLastChunk = idx === chunkCount - 1;
+
+      if (currentChunks.length >= maxChunksPerSegment || isLastChunk) {
+        pushSegment(idx + 1);
+      }
+    });
+
+    if (segments.length === 0) {
+      return [{ index: 0, blob: fullBlob, start: 0, end: totalDuration, duration: totalDuration }];
+    }
+
+    if (segments.length > 1) {
+      const lastSegment = segments[segments.length - 1];
+      if (lastSegment.duration < MIN_SEGMENT_DURATION_SECONDS) {
+        const prev = segments[segments.length - 2];
+        const mergedBlob = new Blob([prev.blob, lastSegment.blob], { type: fullBlob.type || 'audio/webm' });
+        const mergedSegment: AudioSegment = {
+          index: prev.index,
+          blob: mergedBlob,
+          start: prev.start,
+          end: lastSegment.end,
+          duration: lastSegment.end - prev.start
+        };
+        segments.splice(segments.length - 2, 2, mergedSegment);
+      }
+    }
+
+    return segments.map((segment, idx) => ({ ...segment, index: idx }));
+  };
+
+  const getBlobDuration = (blob: Blob): Promise<number> => {
+    return new Promise((resolve, reject) => {
+      const audio = document.createElement('audio');
+      const url = URL.createObjectURL(blob);
+
+      const cleanup = () => {
+        URL.revokeObjectURL(url);
+        audio.remove();
+      };
+
+      audio.preload = 'metadata';
+      audio.onloadedmetadata = () => {
+        const duration = audio.duration;
+        cleanup();
+        if (!Number.isFinite(duration)) {
+          reject(new Error('無法取得音訊長度'));
+        } else {
+          resolve(duration);
+        }
+      };
+
+      audio.onerror = () => {
+        cleanup();
+        reject(new Error('音訊載入失敗'));
+      };
+
+      audio.src = url;
+    });
+  };
 
   // 初始化設定和API
   React.useEffect(() => {
@@ -75,6 +194,22 @@ const App: React.FC = () => {
     }
   }, [settings]);
 
+  React.useEffect(() => {
+    const detectPlatform = async () => {
+      try {
+        const result = await window.electronAPI?.app.getPlatform();
+        if (result) {
+          setPlatform(result as NodeJS.Platform);
+          console.log('偵測到作業系統平台:', result);
+        }
+      } catch (error) {
+        console.warn('偵測作業系統平台失敗:', error);
+      }
+    };
+
+    detectPlatform();
+  }, []);
+
   // Timer effect for recording time
   React.useEffect(() => {
     let interval: NodeJS.Timeout;
@@ -93,23 +228,37 @@ const App: React.FC = () => {
 
   // 設置更新監聽器
   React.useEffect(() => {
-    if (window.electronAPI?.updater) {
-      // 監聽更新可用事件
-      window.electronAPI.updater.onUpdateAvailable((info) => {
+    const api = window.electronAPI;
+
+    if (api?.updater) {
+      api.updater.onUpdateAvailable((info) => {
         console.log('發現新版本:', info.version);
         setUpdateAvailable(true);
+        setUpdateDownloaded(false);
         setUpdateInfo(info);
       });
 
-      // 監聽更新下載進度
-      window.electronAPI.updater.onUpdateProgress((progress) => {
+      api.updater.onUpdateProgress((progress) => {
         console.log('更新下載進度:', progress.percent + '%');
         setUpdateProgress({
           percent: progress.percent,
           status: `下載中... ${progress.percent.toFixed(1)}%`
         });
       });
+
+      api.updater.onUpdateDownloaded((info) => {
+        console.log('更新下載完成 (renderer):', info.version);
+        setUpdateDownloaded(true);
+        setUpdateProgress({ percent: 100, status: '下載完成，等待安裝' });
+      });
     }
+
+    api?.app.getVersion()
+      .then((version) => setAppVersion(version))
+      .catch((error) => {
+        console.warn('取得應用版本失敗:', error);
+        setAppVersion('');
+      });
   }, []);
 
 
@@ -198,191 +347,57 @@ const App: React.FC = () => {
     }
   };
 
-  // 使用 electron-audio-loopback 錄製系統聲音
-  const getSystemAudio = async (): Promise<MediaStream | null> => {
-    try {
-      console.log('🎵 使用 electron-audio-loopback 獲取系統聲音...');
-
-      // 檢查是否有 loopback API
-      if (!window.electronAPI?.getLoopbackAudioStream) {
-        console.error('❌ getLoopbackAudioStream 函數不可用');
-        return null;
-      }
-
-      try {
-        // 使用 electron-audio-loopback 獲取系統音頻
-        const stream = await window.electronAPI.getLoopbackAudioStream();
-
-        if (stream && stream instanceof MediaStream) {
-          const audioTracks = stream.getAudioTracks();
-
-          if (audioTracks.length > 0) {
-            console.log('🎉 成功使用 electron-audio-loopback 獲取系統音頻！');
-            console.log('🎵 Loopback 音訊軌道:', audioTracks.map(t => ({
-              id: t.id,
-              label: t.label,
-              kind: t.kind,
-              enabled: t.enabled
-            })));
-
-            return stream;
-          } else {
-            console.error('❌ Loopback 音訊流中沒有音訊軌道');
-          }
-        } else {
-          console.error('❌ Loopback 返回無效的音訊流');
-        }
-      } catch (loopbackError) {
-        console.error('❌ electron-audio-loopback 錄製失敗:', loopbackError);
-        console.log('🔄 回退到其他方法...');
-      }
-
-      // 回退方法：檢查虛擬音頻設備
-      console.log('🔄 檢查虛擬音頻設備...');
-
-      const devices = await navigator.mediaDevices.enumerateDevices();
-      const audioInputs = devices.filter(device => device.kind === 'audioinput');
-
-      console.log('🔍 可用音頻設備:', audioInputs.map(d => ({
-        label: d.label,
-        deviceId: d.deviceId.substring(0, 20) + '...'
-      })));
-
-      // 查找立體聲混音或虛擬音頻設備
-      const systemAudioDevice = audioInputs.find(device => {
-        const label = device.label.toLowerCase();
-        return (
-          label.includes('stereo mix') ||
-          label.includes('立體聲混音') ||
-          label.includes('what u hear') ||
-          label.includes('loopback') ||
-          label.includes('cable') ||
-          label.includes('voicemeeter') ||
-          label.includes('virtual')
-        );
-      });
-
-      if (systemAudioDevice) {
-        console.log('✅ 找到系統音頻設備:', systemAudioDevice.label);
-
-        try {
-          const stream = await navigator.mediaDevices.getUserMedia({
-            audio: {
-              deviceId: { exact: systemAudioDevice.deviceId },
-              echoCancellation: false,
-              noiseSuppression: false,
-              autoGainControl: false
-            },
-            video: false
-          });
-
-          const audioTracks = stream.getAudioTracks();
-          if (audioTracks.length > 0) {
-            console.log('🎉 使用系統音頻設備成功！');
-            return stream;
-          }
-        } catch (deviceError) {
-          console.error('❌ 系統音頻設備錄製失敗:', deviceError);
-        }
-      }
-
-      // 最後回退：使用預設麥克風
-      console.log('⚠️ 未找到系統音頻設備，回退到麥克風');
-      console.log('💡 建議啟用 Windows 立體聲混音來支援系統聲音錄製');
-
-      try {
-        const stream = await navigator.mediaDevices.getUserMedia({
-          audio: {
-            echoCancellation: false,
-            noiseSuppression: false,
-            autoGainControl: false
-          },
-          video: false
-        });
-
-        const audioTracks = stream.getAudioTracks();
-        if (audioTracks.length > 0) {
-          console.log('🎤 回退到預設麥克風:', audioTracks[0].label);
-          return stream;
-        }
-      } catch (micError) {
-        console.error('❌ 麥克風也無法使用:', micError);
-      }
-
-      return null;
-    } catch (error) {
-      console.error('❌ 系統聲音錄製完全失敗:', error);
-      return null;
-    }
-  };
-
-  // 獲取麥克風
-  const getMicrophoneAudio = async (): Promise<MediaStream | null> => {
-    try {
-      console.log('正在請求麥克風權限...');
-      const stream = await navigator.mediaDevices.getUserMedia({ 
-        audio: {
-          echoCancellation: true,
-          noiseSuppression: true,
-          autoGainControl: true,
-          sampleRate: 48000
-        } 
-      });
-      
-      console.log('麥克風獲取成功，軌道數:', stream.getAudioTracks().length);
-      return stream;
-    } catch (error) {
-      console.error('麥克風獲取失敗:', error);
-      return null;
-    }
-  };
-
   // 合併音訊流
-  const mergeAudioStreams = (streams: MediaStream[]): MediaStream => {
-    const audioContext = new AudioContext();
-    const destination = audioContext.createMediaStreamDestination();
-    
-    streams.forEach(stream => {
-      if (stream.getAudioTracks().length > 0) {
-        const source = audioContext.createMediaStreamSource(stream);
-        source.connect(destination);
-      }
-    });
-    
-    return destination.stream;
-  };
-
   const startRecording = async () => {
+    const activeStreams: MediaStream[] = [];
+    let finalStream: MediaStream | null = null;
+
     try {
       setRecordingStatus('正在啟動錄音...');
       
-      let finalStream: MediaStream;
       const streams: MediaStream[] = [];
       
       // 根據錄音模式獲取對應的音訊流
       if (recordingMode === 'microphone' || recordingMode === 'both') {
         setRecordingStatus('正在獲取麥克風權限...');
-        const micStream = await getMicrophoneAudio();
-        if (micStream) {
-          streams.push(micStream);
-          setMicrophoneStream(micStream);
-        } else if (recordingMode === 'microphone') {
-          throw new Error('無法獲取麥克風權限');
-        }
+        const micStream = await requestMicrophoneStream();
+        streams.push(micStream);
+        activeStreams.push(micStream);
+        setMicrophoneStream(micStream);
       }
       
       if (recordingMode === 'system' || recordingMode === 'both') {
         setRecordingStatus('正在獲取系統聲音權限...');
-        const sysStream = await getSystemAudio();
-        if (sysStream && sysStream.getAudioTracks) {
-          console.log('✅ 系統聲音流有效，軌道數:', sysStream.getAudioTracks().length);
-          streams.push(sysStream);
-          setSystemStream(sysStream);
+        const resolvedPlatform = platform === 'unknown' && /mac/i.test(navigator.userAgent)
+          ? 'darwin'
+          : platform;
+
+        const systemResult = await requestSystemAudioStream({
+          platform: resolvedPlatform,
+          preferDisplayCapture: resolvedPlatform === 'darwin',
+          logger: (message, data) => console.log(message, data ?? '')
+        });
+
+        systemResult.warnings.forEach(warning => console.warn('⚠️ 系統聲音警告:', warning));
+
+        if (systemResult.stream && systemResult.stream.getAudioTracks) {
+          console.log('✅ 系統聲音流有效，軌道數:', systemResult.stream.getAudioTracks().length);
+          streams.push(systemResult.stream);
+          activeStreams.push(systemResult.stream);
+          setSystemStream(systemResult.stream);
+
+          if (systemResult.source === 'display') {
+            setRecordingStatus('已透過螢幕錄製取得系統聲音');
+          }
         } else if (recordingMode === 'system') {
-          console.error('❌ 系統聲音返回無效的 MediaStream:', sysStream);
-          throw new Error('無法獲取系統聲音權限 - 返回的不是有效的 MediaStream');
+          const reason = systemResult.error || '無法獲取系統聲音來源';
+          console.error('❌ 系統聲音擷取失敗:', reason);
+          throw new Error(reason);
         } else {
-          console.warn('⚠️ 系統聲音獲取失敗，繼續使用麥克風');
+          console.warn('⚠️ 系統聲音獲取失敗，繼續使用麥克風:', systemResult.error);
+          if (systemResult.error) {
+            setRecordingStatus(`系統聲音取得失敗：${systemResult.error}，將僅錄製麥克風`);
+          }
         }
       }
       
@@ -393,18 +408,19 @@ const App: React.FC = () => {
       // 如果有多個音訊流，合併它們
       if (streams.length > 1) {
         setRecordingStatus('正在合併音訊源...');
-        finalStream = mergeAudioStreams(streams);
+        finalStream = mergeMediaStreams(streams);
+        activeStreams.push(finalStream);
       } else {
         finalStream = streams[0];
       }
       
-      if (finalStream && finalStream.getAudioTracks) {
-        console.log('最終音訊串流，軌道數:', finalStream.getAudioTracks().length);
-      } else {
+      if (!finalStream || !finalStream.getAudioTracks) {
         console.error('❌ 最終音訊串流無效:', finalStream);
         throw new Error('音訊串流合併失敗 - 無效的 MediaStream');
       }
-      
+
+      console.log('最終音訊串流，軌道數:', finalStream.getAudioTracks().length);
+
       const recorder = new MediaRecorder(finalStream);
       const chunks: Blob[] = [];
       
@@ -436,12 +452,13 @@ const App: React.FC = () => {
             blob: audioBlob,
             timestamp: new Date().toLocaleString('zh-TW'),
             duration: recordingTime,
-            size: audioBlob.size
+            size: audioBlob.size,
+            chunks: [...chunks]
           };
           
           setRecordings(prev => [newRecording, ...prev]);
           setRecordingStatus(`錄音完成！檔案已自動保存: ${filename} (${(audioBlob.size / 1024).toFixed(1)} KB)`);
-          setAudioChunks([audioBlob]); // 保存音訊數據供後續使用
+          setAudioChunks([...chunks]); // 保存原始音訊片段供後續使用
           
         } catch (error) {
           console.error('錄音保存失敗:', error);
@@ -449,20 +466,16 @@ const App: React.FC = () => {
         }
         
         // 清理所有音訊流
-        [systemStream, microphoneStream, finalStream].forEach(stream => {
-          if (stream) {
-            stream.getTracks().forEach(track => {
-              console.log('關閉音訊軌道:', track.kind, track.label);
-              track.stop();
-            });
-          }
+        activeStreams.forEach(stream => {
+          console.log('關閉音訊串流');
+          stopStream(stream);
         });
         
         setSystemStream(null);
         setMicrophoneStream(null);
         
         // 自動啟動轉錄流程
-        startTranscriptionJob(audioBlob, filename);
+        startTranscriptionJob(audioBlob, filename, [...chunks], recordingTime);
       };
 
       recorder.onerror = (event) => {
@@ -484,6 +497,9 @@ const App: React.FC = () => {
       console.error('啟動錄音失敗:', error);
       setRecordingStatus('啟動錄音失敗：' + (error as Error).message);
       alert('錄音啟動失敗：' + (error as Error).message);
+      activeStreams.forEach(stream => stopStream(stream));
+      setSystemStream(null);
+      setMicrophoneStream(null);
     }
   };
 
@@ -497,14 +513,8 @@ const App: React.FC = () => {
       
       // 立即清理音訊流（防止錄音結束前就清理）
       setTimeout(() => {
-        [systemStream, microphoneStream].forEach(stream => {
-          if (stream) {
-            stream.getTracks().forEach(track => {
-              console.log('延遲關閉音訊軌道:', track.kind, track.label);
-              track.stop();
-            });
-          }
-        });
+        stopStream(systemStream);
+        stopStream(microphoneStream);
         setSystemStream(null);
         setMicrophoneStream(null);
       }, 1000);
@@ -533,19 +543,28 @@ const App: React.FC = () => {
       console.log('📁 檔案大小:', blob.size, '位元組');
 
       // 確定儲存路徑
-      let savePath;
-      if (settings.recordingSavePath && settings.recordingSavePath.trim() !== '' &&
-          !settings.recordingSavePath.startsWith('~')) {
-        savePath = settings.recordingSavePath.trim();
-        console.log('📍 使用設定的儲存路徑:', savePath);
-      } else {
-        savePath = await window.electronAPI.app.getPath('downloads');
-        console.log('📍 使用預設下載路徑:', savePath);
+      let baseDirectory: string | undefined;
+      const preferred = settings.recordingSavePath?.trim();
+
+      if (preferred) {
+        if (preferred.startsWith('~/')) {
+          const homePath = await window.electronAPI.app.getPath('home');
+          const relative = preferred.slice(2);
+          baseDirectory = joinPath(homePath, relative);
+          console.log('📍 使用家目錄相對路徑儲存:', baseDirectory);
+        } else if (!preferred.startsWith('~')) {
+          baseDirectory = preferred;
+          console.log('📍 使用設定的儲存路徑:', baseDirectory);
+        }
       }
 
-      // 標準化路徑分隔符為反斜線
-      savePath = savePath.replace(/\//g, '\\');
-      const fullPath = `${savePath}\\${filename}`;
+      if (!baseDirectory) {
+        baseDirectory = await window.electronAPI.app.getPath('downloads');
+        console.log('📍 使用預設下載路徑:', baseDirectory);
+      }
+
+      const normalizedBase = normalizePath(baseDirectory);
+      const fullPath = joinPath(normalizedBase, filename);
       console.log('🎯 完整儲存路徑:', fullPath);
 
       // 轉換為 ArrayBuffer 並儲存
@@ -573,7 +592,12 @@ const App: React.FC = () => {
   };
 
   // 啟動轉錄作業
-  const startTranscriptionJob = async (audioBlob: Blob, filename: string) => {
+  const startTranscriptionJob = async (
+    audioBlob: Blob,
+    filename: string,
+    originalChunks: Blob[] = [],
+    durationSeconds: number = recordingTime
+  ) => {
     // 防止重複執行：檢查是否已經在處理相同檔案
     if (processingJobs.has(filename)) {
       console.log('⚠️ 轉錄任務已在進行中，跳過重複執行:', filename);
@@ -604,10 +628,10 @@ const App: React.FC = () => {
       // 檢查是否使用 Gemini API
       if (settings.useGemini && settings.geminiApiKey) {
         console.log('使用 Google Gemini API 進行轉錄');
-        await startGeminiTranscription(audioBlob, filename, jobId);
+        await startGeminiTranscription(audioBlob, filename, jobId, originalChunks, durationSeconds);
       } else if (!settings.useMock) {
         console.log('使用原有 API 進行轉錄');
-        await startOriginalApiTranscription(audioBlob, filename, jobId);
+        await startOriginalApiTranscription(audioBlob, filename, jobId, originalChunks, durationSeconds);
       } else {
         console.log('使用 Mock API 進行轉錄');
         await startMockTranscription(jobId);
@@ -627,7 +651,13 @@ const App: React.FC = () => {
   };
 
   // 使用 Gemini API 進行轉錄
-  const startGeminiTranscription = async (audioBlob: Blob, filename: string, jobId: string) => {
+  const startGeminiTranscription = async (
+    audioBlob: Blob,
+    filename: string,
+    jobId: string,
+    originalChunks: Blob[] = [],
+    durationSeconds: number = recordingTime
+  ) => {
     try {
       // 直接使用最新的設定，不等待 hydration 狀態
       const currentSettings = useSettingsStore.getState().settings;
@@ -645,33 +675,59 @@ const App: React.FC = () => {
       
       // 直接開始轉錄流程，不進行額外的連接測試
       
-      // 更新狀態：開始上傳
-      updateJob(jobId, { status: 'stt', progress: 10 });
-      setRecordingStatus('API 連接成功，正在上傳檔案到 Gemini...');
-      
-      // 1. 上傳檔案
-      const uploadResult = await geminiClient.uploadFile(audioBlob, filename);
-      console.log('Gemini 檔案上傳完成:', uploadResult);
-      
-      // 更新進度
-      updateJob(jobId, { progress: 50 });
-      setRecordingStatus('檔案上傳完成，開始轉錄...');
-      
-      // 添加延遲以避免請求過於頻繁
-      await new Promise(resolve => setTimeout(resolve, 2000));
-      
-      // 2. 第一步：生成逐字稿修正
+      const segments = createAudioSegments(audioBlob, originalChunks, durationSeconds);
+      console.log('📼 分段資訊:', segments.map(s => ({ index: s.index + 1, duration: s.duration }))); 
+
       const mimeType = audioBlob.type || 'audio/webm';
-      const transcriptionResult = await geminiClient.generateTranscription(
-        uploadResult.uri, 
-        mimeType, 
-        settings.customTranscriptPrompt,
-        settings.vocabularyList
-      );
-      console.log('Gemini 逐字稿修正完成:', transcriptionResult);
-      
-      // 3. 解析轉錄結果
-      const parsedResult = geminiClient.parseTranscriptionResult(transcriptionResult);
+      const transcriptSegments: string[] = [];
+
+      updateJob(jobId, { status: 'stt', progress: 5 });
+      setRecordingStatus(`API 連接成功，準備處理音訊（共 ${segments.length} 段）...`);
+
+      for (const segment of segments) {
+        const partLabel = segments.length > 1
+          ? `第 ${segment.index + 1}/${segments.length} 段（約 ${Math.round(segment.start)}s ~ ${Math.round(segment.end)}s）`
+          : '整段音訊';
+
+        setRecordingStatus(`正在上傳 ${partLabel} 到 Gemini...`);
+        const segmentFilename = segments.length > 1
+          ? `${filename.replace(/\.\w+$/, '')}-part-${segment.index + 1}.webm`
+          : filename;
+
+        const uploadResult = await geminiClient.uploadFile(segment.blob, segmentFilename);
+        console.log(`Gemini 段落上傳完成 (${segment.index + 1}/${segments.length}):`, uploadResult.name);
+
+        const uploadProgress = 5 + Math.floor(((segment.index + 1) / segments.length) * 25);
+        updateJob(jobId, { progress: uploadProgress });
+
+        await new Promise(resolve => setTimeout(resolve, 1500));
+
+        setRecordingStatus(`開始轉錄 ${partLabel}...`);
+        const transcriptionResult = await geminiClient.generateTranscription(
+          uploadResult.uri,
+          mimeType,
+          settings.customTranscriptPrompt,
+          settings.vocabularyList,
+          {
+            index: segment.index,
+            total: segments.length,
+            startTime: segment.start,
+            endTime: segment.end
+          }
+        );
+
+        transcriptSegments.push(transcriptionResult.trim());
+
+        const segmentProgress = 30 + Math.floor(((segment.index + 1) / segments.length) * 30);
+        updateJob(jobId, { progress: segmentProgress });
+        await new Promise(resolve => setTimeout(resolve, 1200));
+      }
+
+      const combinedTranscriptRaw = transcriptSegments.join('\n\n');
+      console.log('Gemini 逐字稿合併完成');
+
+      const parsedResult = geminiClient.parseTranscriptionResult(combinedTranscriptRaw);
+      updateJob(jobId, { progress: 80 });
       
       // 4. 後處理：應用詞彙表修正（雙重保險）
       if (settings.vocabularyList && settings.vocabularyList.length > 0) {
@@ -728,7 +784,7 @@ const App: React.FC = () => {
   };
 
   // 使用原有 API 進行轉錄
-  const startOriginalApiTranscription = async (audioBlob: Blob, filename: string, jobId: string) => {
+  const startOriginalApiTranscription = async (audioBlob: Blob, filename: string, jobId: string, originalChunks: Blob[] = [], durationSeconds: number = recordingTime) => {
     try {
       const api = getAPI();
       
@@ -816,9 +872,10 @@ const App: React.FC = () => {
       
       // 將 File 轉換為 Blob
       const fileBlob = new Blob([file], { type: file.type });
+      const estimatedDuration = await getBlobDuration(fileBlob).catch(() => 0);
       
       // 直接啟動轉錄流程
-      await startTranscriptionJob(fileBlob, file.name);
+      await startTranscriptionJob(fileBlob, file.name, [], estimatedDuration || recordingTime);
       
     } catch (error) {
       console.error('檔案上傳處理失敗:', error);
@@ -1184,7 +1241,7 @@ const App: React.FC = () => {
                         <button
                           onClick={() => {
                             // 啟動轉錄流程
-                            startTranscriptionJob(recording.blob, recording.filename);
+                            startTranscriptionJob(recording.blob, recording.filename, recording.chunks || [], recording.duration);
                           }}
                           style={{
                             padding: '8px 16px',
@@ -1977,7 +2034,46 @@ const App: React.FC = () => {
                     <p style={{ marginBottom: '1rem' }}>
                       🎉 發現新版本 <strong>{updateInfo?.version}</strong>！
                     </p>
-                    {updateProgress ? (
+                    {updateDownloaded ? (
+                      <div style={{ marginBottom: '1rem' }}>
+                        <p style={{ marginBottom: '0.75rem' }}>更新已下載完成，可以立即安裝。</p>
+                        <div style={{ display: 'flex', gap: '0.5rem' }}>
+                          <button
+                            onClick={() => window.electronAPI?.updater.installUpdate()}
+                            style={{
+                              padding: '0.75rem 1rem',
+                              backgroundColor: '#10b981',
+                              color: 'white',
+                              border: 'none',
+                              borderRadius: '4px',
+                              cursor: 'pointer',
+                              fontSize: '14px'
+                            }}
+                          >
+                            🔁 立即重啟安裝
+                          </button>
+                          <button
+                            onClick={() => {
+                              setUpdateAvailable(false);
+                              setUpdateDownloaded(false);
+                              setUpdateInfo(null);
+                              setUpdateProgress(null);
+                            }}
+                            style={{
+                              padding: '0.75rem 1rem',
+                              backgroundColor: '#6b7280',
+                              color: 'white',
+                              border: 'none',
+                              borderRadius: '4px',
+                              cursor: 'pointer',
+                              fontSize: '14px'
+                            }}
+                          >
+                            稍後再說
+                          </button>
+                        </div>
+                      </div>
+                    ) : updateProgress ? (
                       <div style={{ marginBottom: '1rem' }}>
                         <div style={{
                           width: '100%',
@@ -2003,12 +2099,16 @@ const App: React.FC = () => {
                           onClick={async () => {
                             if (window.electronAPI?.updater) {
                               try {
+                                setUpdateProgress({ percent: 0, status: '準備下載更新...' });
+                                setUpdateDownloaded(false);
                                 const result = await window.electronAPI.updater.downloadUpdate();
                                 if (!result.success) {
                                   alert('下載更新失敗: ' + result.error);
+                                  setUpdateProgress(null);
                                 }
                               } catch (error) {
                                 alert('下載更新時發生錯誤');
+                                setUpdateProgress(null);
                               }
                             }
                           }}
@@ -2047,14 +2147,23 @@ const App: React.FC = () => {
                 ) : (
                   <div style={{ color: '#374151' }}>
                     <p style={{ marginBottom: '1rem' }}>
-                      目前版本：<strong>1.0.0</strong>
+                      目前版本：<strong>{appVersion || '取得版本中...'}</strong>
                     </p>
                     <button
                       onClick={async () => {
                         if (window.electronAPI?.updater) {
                           try {
                             const result = await window.electronAPI.updater.checkForUpdates();
-                            if (!result.available) {
+                            if (result.available && result.version) {
+                              setUpdateAvailable(true);
+                              setUpdateDownloaded(false);
+                              setUpdateProgress(null);
+                              setUpdateInfo({ version: result.version });
+                            } else {
+                              setUpdateAvailable(false);
+                              setUpdateDownloaded(false);
+                              setUpdateInfo(null);
+                              setUpdateProgress(null);
                               alert(result.message || '當前已是最新版本');
                             }
                           } catch (error) {

@@ -3,15 +3,11 @@ import * as path from 'path';
 import { autoUpdater } from 'electron-updater';
 import { setupRecordingIPC } from './ipc/recording';
 import { setupSystemAudioIPC } from './ipc/system-audio';
-import { initMain } from 'electron-audio-loopback';
 
 class MeetingRecorderApp {
   private mainWindow: BrowserWindow | null = null;
 
   constructor() {
-    // Initialize electron-audio-loopback before app is ready
-    initMain();
-    
     this.initializeApp();
     this.setupAutoUpdater();
   }
@@ -192,45 +188,6 @@ class MeetingRecorderApp {
       }
     });
 
-    // Loopback audio stream in main process
-    ipcMain.handle('loopback:getAudioStream', async () => {
-      try {
-        console.log('🎵 Main process: 獲取 loopback 音訊流...');
-        const { getLoopbackAudioMediaStream } = require('electron-audio-loopback');
-        const stream = await getLoopbackAudioMediaStream();
-        
-        console.log('🔍 Main process loopbackStream:', stream);
-        console.log('🔍 Main process loopbackStream 類型:', typeof stream);
-        console.log('🔍 Main process loopbackStream constructor:', stream?.constructor?.name);
-        
-        if (stream && typeof stream.getAudioTracks === 'function') {
-          const tracks = stream.getAudioTracks();
-          console.log('✅ Main process: 成功獲取音訊軌道數:', tracks.length);
-          
-          // 序列化 MediaStream 數據供 renderer 使用
-          const serializedStream = {
-            id: stream.id,
-            active: stream.active,
-            tracks: tracks.map((track: MediaStreamTrack) => ({
-              id: track.id,
-              kind: track.kind,
-              label: track.label,
-              enabled: track.enabled,
-              settings: track.getSettings()
-            }))
-          };
-          
-          return { success: true, stream: serializedStream };
-        } else {
-          console.error('❌ Main process: loopback 返回無效對象');
-          return { success: false, error: '無效的 MediaStream' };
-        }
-      } catch (error) {
-        console.error('❌ Main process loopback 錯誤:', error);
-        return { success: false, error: (error as Error).message };
-      }
-    });
-
     // Development helpers
     if (process.env.NODE_ENV === 'development') {
       ipcMain.handle('dev:openDevTools', () => {
@@ -298,7 +255,13 @@ class MeetingRecorderApp {
 
     autoUpdater.on('update-downloaded', (info) => {
       console.log('更新下載完成:', info.version);
-      
+
+      if (this.mainWindow) {
+        this.mainWindow.webContents.send('update-downloaded', {
+          version: info.version
+        });
+      }
+
       // 詢問用戶是否立即重啟安裝更新
       dialog.showMessageBox(this.mainWindow!, {
         type: 'info',
