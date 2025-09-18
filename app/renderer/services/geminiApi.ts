@@ -71,21 +71,88 @@ class GeminiAPIClient {
   private baseURL = 'https://generativelanguage.googleapis.com/v1beta';
   private uploadURL = 'https://generativelanguage.googleapis.com/upload/v1beta/files';
 
-  constructor(apiKey: string) {
+  // 可用的 Gemini 模型列表（按優先級排序）
+  private availableModels = [
+    'gemini-2.5-pro',     // 優先使用最新的 2.5 Pro
+    'gemini-2.5-flash'    // 降級到 2.5 Flash
+  ];
+
+  private currentModel = 'gemini-2.5-pro'; // 預設使用最新模型
+  private enableFallback = true;
+  private retryConfig = {
+    maxRetries: 5,
+    baseDelay: 30000,
+    enableJitter: true
+  };
+  private diagnosticMode = false;
+
+  constructor(
+    apiKey: string,
+    settings?: {
+      preferredModel?: string;
+      enableFallback?: boolean;
+      retryConfig?: {
+        maxRetries?: number;
+        baseDelay?: number;
+        enableJitter?: boolean;
+      };
+      diagnosticMode?: boolean;
+    }
+  ) {
     this.apiKey = apiKey;
+
+    if (settings?.preferredModel && this.availableModels.includes(settings.preferredModel)) {
+      this.currentModel = settings.preferredModel;
+    }
+
+    if (settings?.enableFallback !== undefined) {
+      this.enableFallback = settings.enableFallback;
+    }
+
+    if (settings?.retryConfig) {
+      this.retryConfig = {
+        ...this.retryConfig,
+        ...settings.retryConfig
+      };
+    }
+
+    if (settings?.diagnosticMode !== undefined) {
+      this.diagnosticMode = settings.diagnosticMode;
+    }
+
+    if (this.diagnosticMode) {
+      console.log('🔧 GeminiAPIClient 初始化:', {
+        model: this.currentModel,
+        enableFallback: this.enableFallback,
+        retryConfig: this.retryConfig,
+        diagnosticMode: this.diagnosticMode
+      });
+    }
   }
 
-  // 測試 API 連接（帶重試機制）
-  async testConnection(): Promise<boolean> {
-    const maxRetries = 3;
-    const baseDelay = 10000; // 10秒 - 避免過於頻繁的請求
+  // 增強的 API 連接測試 - 提供詳細診斷信息
+  async testConnection(): Promise<{
+    success: boolean;
+    details: {
+      apiKeyValid: boolean;
+      modelAccessible: boolean;
+      responseTime: number;
+      errorMessage?: string;
+      statusCode?: number;
+      suggestedActions?: string[];
+    };
+  }> {
+    const startTime = Date.now();
 
-    for (let attempt = 1; attempt <= maxRetries; attempt++) {
-      try {
-        console.log(`🔄 測試 Gemini API 連接... (第 ${attempt}/${maxRetries} 次嘗試)`);
-        
+    try {
+      console.log('🔍 開始 Gemini API 完整診斷...');
+
+      // 使用新的重試機制測試API連接
+      const result = await this.retryWithExponentialBackoff(async () => {
         const testUrl = `${this.baseURL}/models/gemini-2.5-pro:generateContent?key=${this.apiKey}`;
-        
+
+        console.log('📡 測試 API 端點:', testUrl.replace(this.apiKey, 'API_KEY_HIDDEN'));
+
         const testResponse = await fetch(testUrl, {
           method: 'POST',
           headers: {
@@ -94,53 +161,205 @@ class GeminiAPIClient {
           body: JSON.stringify({
             contents: [{
               parts: [{
-                text: "Hello, just testing connection"
+                text: "API連接測試"
               }]
-            }]
+            }],
+            generationConfig: {
+              temperature: 0.1,
+              maxOutputTokens: 10
+            }
           })
         });
 
-        console.log(`📡 API 連接測試回應狀態: ${testResponse.status} (嘗試 ${attempt})`);
-        
-        if (testResponse.ok) {
-          console.log('✅ API 連接測試成功');
-          return true;
-        } else if (testResponse.status === 503) {
-          // 503 服務過載 - 需要重試
+        const responseTime = Date.now() - startTime;
+        console.log(`⏱️ API 回應時間: ${responseTime}ms, 狀態: ${testResponse.status}`);
+
+        if (!testResponse.ok) {
           const errorText = await testResponse.text();
-          console.log(`⏳ API 服務過載 (503)，第 ${attempt}/${maxRetries} 次嘗試失敗`);
-          
-          if (attempt < maxRetries) {
-            const delay = baseDelay * Math.pow(2, attempt - 1); // 指數退避：10s, 20s, 40s
-            console.log(`⏱️ 等待 ${Math.round(delay/1000)}秒後重試...`);
-            await new Promise(resolve => setTimeout(resolve, delay));
-            continue;
-          } else {
-            console.error('❌ API 服務持續過載，請稍後再試');
-            return false;
-          }
-        } else {
-          // 其他錯誤不重試
-          const errorText = await testResponse.text();
-          console.error('❌ API 連接測試失敗:', testResponse.status, errorText);
-          return false;
+          throw new Error(`API 請求失敗: ${testResponse.status} - ${errorText}`);
         }
-        
-      } catch (error) {
-        console.error(`❌ API 連接測試錯誤 (嘗試 ${attempt}):`, error);
-        
-        if (attempt < maxRetries) {
-          const delay = baseDelay * Math.pow(2, attempt - 1);
-          console.log(`⏱️ 網路錯誤，等待 ${Math.round(delay/1000)}秒後重試...`);
-          await new Promise(resolve => setTimeout(resolve, delay));
+
+        const responseData = await testResponse.json();
+        console.log('✅ API 連接測試成功，模型回應正常');
+
+        return {
+          success: true,
+          details: {
+            apiKeyValid: true,
+            modelAccessible: true,
+            responseTime,
+            suggestedActions: ['API 連接正常，可以開始轉錄']
+          }
+        };
+      }, 2, 20000); // 降低測試重試次數和間隔
+
+      return result;
+
+    } catch (error: any) {
+      const responseTime = Date.now() - startTime;
+      const errorMessage = error.message || '未知錯誤';
+
+      console.error('❌ API 連接測試失敗:', errorMessage);
+
+      // 解析錯誤類型並提供建議
+      const suggestions: string[] = [];
+      let apiKeyValid = true;
+      let statusCode: number | undefined;
+
+      if (errorMessage.includes('401') || errorMessage.includes('Invalid API key')) {
+        apiKeyValid = false;
+        statusCode = 401;
+        suggestions.push('檢查 API Key 是否正確');
+        suggestions.push('確認 API Key 是否已啟用');
+      } else if (errorMessage.includes('403')) {
+        statusCode = 403;
+        suggestions.push('檢查 API Key 權限設定');
+        suggestions.push('確認已啟用 Generative Language API');
+      } else if (errorMessage.includes('503')) {
+        statusCode = 503;
+        suggestions.push('Google API 服務目前過載');
+        suggestions.push('請稍等幾分鐘後再試');
+        suggestions.push('考慮在非高峰時段使用');
+      } else if (errorMessage.includes('429')) {
+        statusCode = 429;
+        suggestions.push('已達到 API 使用配額限制');
+        suggestions.push('檢查 Google Cloud Console 的配額設定');
+        suggestions.push('等待配額重置或升級方案');
+      } else if (errorMessage.includes('Failed to fetch') || errorMessage.includes('Network')) {
+        suggestions.push('檢查網路連接');
+        suggestions.push('確認防火牆或代理設定');
+        suggestions.push('嘗試使用不同網路');
+      } else {
+        suggestions.push('檢查 Google API 服務狀態');
+        suggestions.push('確認 API 端點 URL 正確');
+        suggestions.push('聯繫技術支援');
+      }
+
+      return {
+        success: false,
+        details: {
+          apiKeyValid,
+          modelAccessible: false,
+          responseTime,
+          errorMessage,
+          statusCode,
+          suggestedActions: suggestions
+        }
+      };
+    }
+  }
+
+  // 簡化版連接測試（保持向後相容性）
+  async testConnectionSimple(): Promise<boolean> {
+    const result = await this.testConnection();
+    return result.success;
+  }
+
+  // 測試並找到可用的模型
+  async findAvailableModel(): Promise<string | null> {
+    console.log('🔍 開始檢測可用的 Gemini 模型...');
+
+    for (const model of this.availableModels) {
+      try {
+        console.log(`🧪 測試模型: ${model}`);
+
+        const testUrl = `${this.baseURL}/models/${model}:generateContent?key=${this.apiKey}`;
+
+        const testResponse = await fetch(testUrl, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify({
+            contents: [{
+              parts: [{
+                text: "測試模型可用性"
+              }]
+            }],
+            generationConfig: {
+              temperature: 0.1,
+              maxOutputTokens: 10
+            }
+          })
+        });
+
+        if (testResponse.ok) {
+          console.log(`✅ 模型 ${model} 可用`);
+          this.currentModel = model;
+          return model;
+        } else if (testResponse.status === 404) {
+          console.log(`❌ 模型 ${model} 不存在或不可用`);
+          continue;
+        } else if (testResponse.status === 503) {
+          console.log(`⏳ 模型 ${model} 暫時過載，嘗試下一個模型`);
           continue;
         } else {
-          return false;
+          const errorText = await testResponse.text();
+          console.log(`⚠️ 模型 ${model} 測試失敗: ${testResponse.status} - ${errorText}`);
+          continue;
+        }
+      } catch (error) {
+        console.log(`⚠️ 測試模型 ${model} 時發生錯誤:`, error);
+        continue;
+      }
+    }
+
+    console.log('❌ 沒有找到可用的模型');
+    return null;
+  }
+
+  // 使用 Fallback 機制執行操作
+  private async executeWithFallback<T>(
+    operation: (model: string) => Promise<T>,
+    context: string = '操作'
+  ): Promise<T> {
+    let lastError: any;
+
+    // 首先嘗試當前模型
+    try {
+      if (this.diagnosticMode) {
+        console.log(`🎯 使用模型 ${this.currentModel} 執行${context}`);
+      }
+      return await operation(this.currentModel);
+    } catch (error: any) {
+      lastError = error;
+      console.log(`⚠️ 模型 ${this.currentModel} 執行${context}失敗:`, error.message);
+
+      // 檢查是否啟用了 fallback 機制
+      if (!this.enableFallback) {
+        console.log('❌ Fallback 機制已停用，不嘗試其他模型');
+        throw lastError;
+      }
+
+      // 如果是503錯誤，嘗試其他模型
+      if (error.message && error.message.includes('503')) {
+        console.log('🔄 嘗試使用其他可用模型...');
+
+        // 嘗試其他模型（優先2.5-pro，降級到2.5-flash）
+        for (const model of this.availableModels) {
+          if (model === this.currentModel) continue; // 跳過已經失敗的模型
+
+          try {
+            console.log(`🔄 API過載，嘗試降級到模型 ${model} 執行${context}`);
+            const result = await operation(model);
+
+            console.log(`✅ 降級模型 ${model} 執行${context}成功，暫時切換為主要模型`);
+            this.currentModel = model; // 切換到成功的模型
+            return result;
+          } catch (fallbackError: any) {
+            if (this.diagnosticMode) {
+              console.log(`⚠️ 降級模型 ${model} 也失敗:`, fallbackError.message);
+            }
+            lastError = fallbackError;
+            continue;
+          }
         }
       }
     }
 
-    return false;
+    // 所有模型都失敗了
+    console.log(`❌ Gemini 2.5 Pro 和 2.5 Flash 都無法執行${context}`);
+    throw lastError;
   }
 
   // 使用正確的 Resumable Upload 方法上傳音訊檔案到 Gemini
@@ -297,50 +516,109 @@ class GeminiAPIClient {
     throw new Error('檔案處理超時');
   }
 
-  // 重試機制輔助函數
+  // 重試機制輔助函數 - 針對API過載問題進行優化，使用動態配置
   private async retryWithExponentialBackoff<T>(
-    operation: () => Promise<T>, 
-    maxRetries: number = 3, 
-    baseDelay: number = 15000 // 15秒 - 轉錄請求需要更長間隔
+    operation: () => Promise<T>,
+    maxRetries?: number, // 如不提供則使用設定值
+    baseDelay?: number, // 如不提供則使用設定值
+    jitterEnabled?: boolean // 如不提供則使用設定值
   ): Promise<T> {
+    // 使用配置中的值或提供的參數
+    const actualMaxRetries = maxRetries ?? this.retryConfig.maxRetries;
+    const actualBaseDelay = baseDelay ?? this.retryConfig.baseDelay;
+    const actualJitterEnabled = jitterEnabled ?? this.retryConfig.enableJitter;
+
+    if (this.diagnosticMode) {
+      console.log('🔄 開始重試機制:', {
+        maxRetries: actualMaxRetries,
+        baseDelay: actualBaseDelay,
+        jitterEnabled: actualJitterEnabled
+      });
+    }
     let lastError: any;
-    
-    for (let attempt = 0; attempt <= maxRetries; attempt++) {
+
+    for (let attempt = 0; attempt <= actualMaxRetries; attempt++) {
       try {
         return await operation();
       } catch (error: any) {
         lastError = error;
-        
-        // 檢查是否是 503 錯誤
+
+        // 檢查是否是 503 錯誤 - 改進處理邏輯
         if (error.message && error.message.includes('503')) {
-          console.log(`API 過載 (503)，第 ${attempt + 1}/${maxRetries + 1} 次嘗試失敗`);
-          
-          if (attempt < maxRetries) {
-            const delay = baseDelay * Math.pow(2, attempt); // 指數退避：15s, 30s, 60s
-            console.log(`等待 ${Math.round(delay/1000)}秒後重試...`);
+          console.log(`🔄 API 過載 (503)，第 ${attempt + 1}/${actualMaxRetries + 1} 次嘗試失敗`);
+          if (this.diagnosticMode) {
+            console.log(`📊 錯誤詳情: ${error.message}`);
+          }
+
+          if (attempt < actualMaxRetries) {
+            // 更保守的指數退避：30s, 60s, 120s, 300s, 600s
+            let delay = actualBaseDelay * Math.pow(2, attempt);
+
+            // 對503錯誤使用更長的延遲
+            if (attempt >= 2) {
+              delay = Math.max(delay, 120000); // 至少2分鐘
+            }
+            if (attempt >= 3) {
+              delay = Math.max(delay, 300000); // 至少5分鐘
+            }
+
+            // 添加隨機抖動避免多個請求同時重試
+            if (actualJitterEnabled) {
+              const jitter = Math.random() * 0.3 * delay; // 0-30%的隨機變化
+              delay = delay + jitter;
+            }
+
+            const delayMinutes = Math.round(delay/60000 * 10) / 10;
+            console.log(`⏳ API持續過載，等待 ${delayMinutes} 分鐘後重試...`);
+            console.log(`💡 建議: 如果問題持續，請稍後再試或檢查Google API狀態`);
+
             await new Promise(resolve => setTimeout(resolve, delay));
             continue;
           }
         }
-        
+
         // 檢查是否是 429 配額超出錯誤
         if (error.message && error.message.includes('429')) {
-          console.log(`API 配額超出 (429)，第 ${attempt + 1}/${maxRetries + 1} 次嘗試失敗`);
-          
-          if (attempt < maxRetries) {
-            const delay = Math.max(baseDelay * Math.pow(2, attempt), 40000); // 至少等待40秒
-            console.log(`配額限制，等待 ${Math.round(delay/1000)}秒後重試...`);
+          console.log(`📈 API 配額超出 (429)，第 ${attempt + 1}/${actualMaxRetries + 1} 次嘗試失敗`);
+
+          if (attempt < actualMaxRetries) {
+            // 429錯誤需要更長的等待時間
+            let delay = Math.max(actualBaseDelay * Math.pow(2, attempt), 60000); // 至少1分鐘
+
+            if (actualJitterEnabled) {
+              const jitter = Math.random() * 0.5 * delay; // 0-50%的隨機變化
+              delay = delay + jitter;
+            }
+
+            const delayMinutes = Math.round(delay/60000 * 10) / 10;
+            console.log(`⏱️ 配額限制，等待 ${delayMinutes} 分鐘後重試...`);
             await new Promise(resolve => setTimeout(resolve, delay));
             continue;
           }
         }
-        
-        // 對於非 503/429 錯誤直接停止重試
-        if (!error.message || (!error.message.includes('503') && !error.message.includes('429'))) {
+
+        // 檢查是否是網路連線錯誤
+        if (error.message && (error.message.includes('Failed to fetch') || error.message.includes('网络'))) {
+          console.log(`🌐 網路連線錯誤，第 ${attempt + 1}/${actualMaxRetries + 1} 次嘗試失敗`);
+
+          if (attempt < actualMaxRetries) {
+            const delay = Math.min(actualBaseDelay * Math.pow(1.5, attempt), 60000); // 網路錯誤用較短間隔
+            console.log(`🔌 網路問題，等待 ${Math.round(delay/1000)} 秒後重試...`);
+            await new Promise(resolve => setTimeout(resolve, delay));
+            continue;
+          }
+        }
+
+        // 對於其他錯誤（4xx客戶端錯誤等）直接停止重試
+        if (!error.message || (!error.message.includes('503') && !error.message.includes('429') && !error.message.includes('Failed to fetch'))) {
+          if (this.diagnosticMode) {
+            console.log(`❌ 遇到不可重試的錯誤: ${error.message}`);
+          }
           throw lastError;
         }
 
-        if (attempt >= maxRetries) {
+        if (attempt >= actualMaxRetries) {
+          console.log(`⛔ 已達到最大重試次數 (${actualMaxRetries + 1})，放棄請求`);
           throw lastError;
         }
       }
@@ -412,7 +690,7 @@ class GeminiAPIClient {
     return textParts.join('\n').trim();
   }
 
-  // 生成轉錄內容
+  // 生成轉錄內容 - 支援模型 Fallback
   async generateTranscription(
     fileUri: string,
     mimeType?: string,
@@ -425,8 +703,6 @@ class GeminiAPIClient {
       endTime: number;
     }
   ): Promise<string> {
-    const generateUrl = `${this.baseURL}/models/gemini-2.5-pro:generateContent?key=${this.apiKey}`;
-
     // 引入詞彙表服務
     const { VocabularyService } = await import('./vocabularyService');
 
@@ -460,7 +736,7 @@ class GeminiAPIClient {
     if (participantsPrompt) {
       finalPrompt += participantsPrompt;
     }
-    
+
     // 如果有詞彙表，將其加入提示詞中
     if (vocabularyList && vocabularyList.length > 0) {
       const vocabularyPrompt = VocabularyService.formatVocabularyForPrompt(vocabularyList);
@@ -478,61 +754,64 @@ class GeminiAPIClient {
 
     const prompt = finalPrompt;
 
-    const requestBody = {
-      contents: [
-        {
-          parts: [
-            {
-              text: prompt
-            },
-            {
-              fileData: {
-                mimeType: mimeType || "audio/webm",
-                fileUri: fileUri
+    // 使用 Fallback 機制執行轉錄
+    return this.executeWithFallback(async (model: string) => {
+      const generateUrl = `${this.baseURL}/models/${model}:generateContent?key=${this.apiKey}`;
+
+      const requestBody = {
+        contents: [
+          {
+            parts: [
+              {
+                text: prompt
+              },
+              {
+                fileData: {
+                  mimeType: mimeType || "audio/webm",
+                  fileUri: fileUri
+                }
               }
-            }
-          ]
+            ]
+          }
+        ],
+        generationConfig: {
+          temperature: 0.1,
+          topK: 40,
+          topP: 0.95,
+          maxOutputTokens: 8192,
+          responseMimeType: "text/plain"
         }
-      ],
-      generationConfig: {
-        temperature: 0.1,
-        topK: 40,
-        topP: 0.95,
-        maxOutputTokens: 8192,
-        responseMimeType: "text/plain"
-      }
-    };
+      };
 
-    // 使用重試機制執行轉錄請求
-    return this.retryWithExponentialBackoff(async () => {
-      console.log('向 Gemini 發送轉錄請求...', fileUri);
-      
-      const response = await fetch(generateUrl, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json'
-        },
-        body: JSON.stringify(requestBody)
+      // 使用重試機制執行轉錄請求
+      return this.retryWithExponentialBackoff(async () => {
+        console.log(`向 Gemini 發送轉錄請求... (模型: ${model}, 檔案: ${fileUri})`);
+
+        const response = await fetch(generateUrl, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify(requestBody)
+        });
+
+        if (!response.ok) {
+          const errorText = await response.text();
+          console.error(`Gemini 轉錄請求失敗 (模型: ${model}):`, response.status, errorText);
+          throw new Error(`Gemini API 請求失敗: ${response.status}`);
+        }
+
+        const result: GeminiGenerateContentResponse = await response.json();
+        console.log(`Gemini 轉錄回應 (模型: ${model}):`, result);
+
+        const transcriptText = this.extractTextFromResponse(result, '轉錄');
+        return transcriptText;
       });
-
-      if (!response.ok) {
-        const errorText = await response.text();
-        console.error('Gemini 轉錄請求失敗:', response.status, errorText);
-        throw new Error(`Gemini API 請求失敗: ${response.status}`);
-      }
-
-      const result: GeminiGenerateContentResponse = await response.json();
-      console.log('Gemini 轉錄回應:', result);
-
-      const transcriptText = this.extractTextFromResponse(result, '轉錄');
-      return transcriptText;
-    });
+    }, '轉錄');
   }
 
-  // 生成自訂摘要
+  // 生成自訂摘要 - 支援模型 Fallback
   async generateCustomSummary(transcriptText: string, customPrompt: string): Promise<string> {
-    const generateUrl = `${this.baseURL}/models/gemini-2.5-pro:generateContent?key=${this.apiKey}`;
-    
     const fullPrompt = `以下是會議的轉錄內容：
 
 ${transcriptText}
@@ -541,49 +820,54 @@ ${transcriptText}
 
 ${customPrompt}`;
 
-    const requestBody = {
-      contents: [
-        {
-          parts: [
-            {
-              text: fullPrompt
-            }
-          ]
+    // 使用 Fallback 機制執行自訂摘要
+    return this.executeWithFallback(async (model: string) => {
+      const generateUrl = `${this.baseURL}/models/${model}:generateContent?key=${this.apiKey}`;
+
+      const requestBody = {
+        contents: [
+          {
+            parts: [
+              {
+                text: fullPrompt
+              }
+            ]
+          }
+        ],
+        generationConfig: {
+          temperature: 0.1,
+          topK: 40,
+          topP: 0.95,
+          maxOutputTokens: 8192,
+          responseMimeType: "text/plain"
         }
-      ],
-      generationConfig: {
-        temperature: 0.1,
-        topK: 40,
-        topP: 0.95,
-        maxOutputTokens: 8192,
-        responseMimeType: "text/plain"
-      }
-    };
+      };
 
-    // 使用重試機制執行自訂摘要請求
-    return this.retryWithExponentialBackoff(async () => {
-      console.log('向 Gemini 發送自訂摘要請求...');
-      
-      const response = await fetch(generateUrl, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json'
-        },
-        body: JSON.stringify(requestBody)
+      // 使用重試機制執行自訂摘要請求
+      return this.retryWithExponentialBackoff(async () => {
+        console.log(`向 Gemini 發送自訂摘要請求... (模型: ${model})`);
+
+        const response = await fetch(generateUrl, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify(requestBody)
+        });
+
+        if (!response.ok) {
+          const errorText = await response.text();
+          console.error(`Gemini 自訂摘要請求失敗 (模型: ${model}):`, response.status, errorText);
+          throw new Error(`Gemini API 請求失敗: ${response.status}`);
+        }
+
+        const result: GeminiGenerateContentResponse = await response.json();
+        console.log(`Gemini 自訂摘要回應 (模型: ${model}):`, result);
+
+        const summaryText = this.extractTextFromResponse(result, '自訂摘要');
+        return summaryText;
       });
-
-      if (!response.ok) {
-        const errorText = await response.text();
-        console.error('Gemini 自訂摘要請求失敗:', response.status, errorText);
-        throw new Error(`Gemini API 請求失敗: ${response.status}`);
-      }
-
-      const result: GeminiGenerateContentResponse = await response.json();
-      console.log('Gemini 自訂摘要回應:', result);
-
-      const summaryText = this.extractTextFromResponse(result, '自訂摘要');
-      return summaryText;
-    });
+    }, '自訂摘要');
   }
 
   // 解析 Gemini 回應（支援 JSON 和純文字格式）
@@ -630,7 +914,7 @@ ${customPrompt}`;
           keyDecisions: [],
           actionItems: [],
           overallSummary: '',
-          minutesMd: `# 會議記錄\n\n${cleanText}`
+          minutesMd: '' // 純文字模式下不提供摘要，需要透過自訂摘要功能生成
         }
       };
     }

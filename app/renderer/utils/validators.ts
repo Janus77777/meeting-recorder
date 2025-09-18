@@ -45,24 +45,35 @@ export interface ValidationResult {
 export const validateSettings = (settings: AppSettings): ValidationResult => {
   const errors: Record<string, string> = {};
 
-  // Validate base URL
-  if (!settings.baseURL.trim()) {
-    errors.baseURL = 'API 基礎網址不能為空';
-  } else if (!isValidAPIEndpoint(settings.baseURL)) {
-    errors.baseURL = 'API 基礎網址格式不正確';
-  }
+  const usingGemini = settings.useGemini !== false;
 
-  // Validate API key (only if not using mock)
-  if (!settings.useMock) {
-    if (!settings.apiKey.trim()) {
-      errors.apiKey = 'API 金鑰不能為空';
-    } else if (!isValidAPIKey(settings.apiKey)) {
-      errors.apiKey = 'API 金鑰格式不正確（8-256 字元，不含空格）';
+  if (usingGemini) {
+    if (settings.geminiApiKey && settings.geminiApiKey.trim() && !isValidAPIKey(settings.geminiApiKey.trim())) {
+      errors.geminiApiKey = 'Gemini API Key 格式不正確（8-256 字元，不含空格）';
+    }
+  } else {
+    const openRouterBaseURL = (settings.openRouterBaseURL || settings.baseURL || '').trim();
+    if (!openRouterBaseURL) {
+      errors.baseURL = 'OpenRouter 基礎網址不能為空';
+    } else if (!isValidAPIEndpoint(openRouterBaseURL)) {
+      errors.baseURL = 'OpenRouter 基礎網址格式不正確';
+    }
+
+    if (!settings.useMock) {
+      const openRouterKey = (settings.openRouterApiKey || settings.apiKey || '').trim();
+      if (!openRouterKey) {
+        errors.apiKey = 'OpenRouter API Key 不能為空';
+      } else if (!isValidAPIKey(openRouterKey)) {
+        errors.apiKey = 'OpenRouter API Key 格式不正確（8-256 字元，不含空格）';
+      }
+    }
+
+    if (!settings.openRouterModel || !settings.openRouterModel.trim()) {
+      errors.openRouterModel = '請輸入要使用的 OpenRouter 模型 ID';
     }
   }
 
-  // Validate environment
-  if (!['dev', 'stg', 'prod'].includes(settings.environment)) {
+  if (!usingGemini && settings.environment && !['dev', 'stg', 'prod'].includes(settings.environment)) {
     errors.environment = '無效的環境設定';
   }
 
@@ -200,24 +211,42 @@ export const checkNetworkConnectivity = async (): Promise<boolean> => {
 };
 
 // API endpoint health check
-export const checkAPIHealth = async (baseURL: string, apiKey?: string): Promise<boolean> => {
+export const checkAPIHealth = async (settings: AppSettings): Promise<boolean> => {
   try {
-    const headers: Record<string, string> = {
-      'Content-Type': 'application/json'
-    };
+    const usingGemini = settings.useGemini !== false;
 
-    if (apiKey) {
-      headers['Authorization'] = `Bearer ${apiKey}`;
+    if (usingGemini) {
+      if (!settings.geminiApiKey || !settings.geminiApiKey.trim()) {
+        return false;
+      }
+
+      const url = `https://generativelanguage.googleapis.com/v1beta/models?key=${encodeURIComponent(settings.geminiApiKey.trim())}`;
+      const response = await fetch(url, {
+        method: 'GET',
+        signal: AbortSignal.timeout(10000)
+      });
+
+      return response.ok;
     }
 
-    // Try to ping a common health endpoint
-    const response = await fetch(`${baseURL}/health`, {
+    const baseURL = (settings.openRouterBaseURL || settings.baseURL || '').replace(/\/$/, '');
+    const apiKey = (settings.openRouterApiKey || settings.apiKey || '').trim();
+
+    if (!baseURL || !apiKey) {
+      return false;
+    }
+
+    const response = await fetch(`${baseURL}/models`, {
       method: 'GET',
-      headers,
+      headers: {
+        'Authorization': `Bearer ${apiKey}`,
+        'X-Title': settings.openRouterTitle || 'Meeting Recorder',
+        'HTTP-Referer': settings.openRouterReferer || 'https://github.com/Janus77777/meeting-recorder'
+      },
       signal: AbortSignal.timeout(10000)
     });
 
-    return response.status < 500; // Accept 4xx as "reachable but unauthorized"
+    return response.ok;
   } catch {
     return false;
   }

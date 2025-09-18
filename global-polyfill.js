@@ -1,2 +1,5 @@
 // Global polyfill for browser environment
-module.exports = globalThis;
+if (typeof window !== 'undefined') {
+  window.global = window;
+}
+module.exports = typeof globalThis !== 'undefined' ? globalThis : (typeof window !== 'undefined' ? window : {});

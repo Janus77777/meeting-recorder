@@ -671,7 +671,12 @@ const App: React.FC = () => {
         throw new Error('請先設定 Gemini API 金鑰');
       }
       
-      const geminiClient = new GeminiAPIClient(currentSettings.geminiApiKey);
+      const geminiClient = new GeminiAPIClient(currentSettings.geminiApiKey, {
+        preferredModel: currentSettings.geminiPreferredModel,
+        enableFallback: currentSettings.geminiEnableFallback,
+        retryConfig: currentSettings.geminiRetryConfig,
+        diagnosticMode: currentSettings.geminiDiagnosticMode
+      });
       
       // 直接開始轉錄流程，不進行額外的連接測試
       
@@ -779,7 +784,77 @@ const App: React.FC = () => {
     } catch (error) {
       console.error('Gemini 轉錄失敗:', error);
       updateJob(jobId, { status: 'failed' });
-      setRecordingStatus('Gemini 轉錄失敗: ' + (error as Error).message);
+
+      // 改進錯誤訊息，提供更具體的指導
+      let errorMessage = '';
+      let suggestions: string[] = [];
+
+      if (error instanceof Error) {
+        const errorMsg = error.message;
+
+        if (errorMsg.includes('503')) {
+          errorMessage = 'Gemini API 服務目前過載';
+          suggestions = [
+            '請稍等 5-10 分鐘後重試',
+            '嘗試在非高峰時段使用',
+            '檢查 Google API 服務狀態'
+          ];
+        } else if (errorMsg.includes('429')) {
+          errorMessage = 'API 使用配額已達上限';
+          suggestions = [
+            '等待配額重置（通常為每日重置）',
+            '升級您的 Google Cloud 方案',
+            '檢查 API 配額設定'
+          ];
+        } else if (errorMsg.includes('401') || errorMsg.includes('Invalid API key')) {
+          errorMessage = 'API 金鑰無效或已過期';
+          suggestions = [
+            '檢查 API 金鑰是否正確',
+            '確認 API 金鑰權限設定',
+            '重新生成 API 金鑰'
+          ];
+        } else if (errorMsg.includes('403')) {
+          errorMessage = 'API 權限不足';
+          suggestions = [
+            '確認已啟用 Generative Language API',
+            '檢查 API 金鑰權限設定',
+            '聯繫管理員確認權限'
+          ];
+        } else if (errorMsg.includes('Failed to fetch') || errorMsg.includes('Network')) {
+          errorMessage = '網路連接問題';
+          suggestions = [
+            '檢查網路連接',
+            '確認防火牆設定',
+            '嘗試重新連接網路'
+          ];
+        } else {
+          errorMessage = errorMsg;
+          suggestions = [
+            '檢查網路連接和 API 設定',
+            '查看詳細錯誤日誌',
+            '嘗試重新啟動應用程式'
+          ];
+        }
+      } else {
+        errorMessage = '未知錯誤';
+        suggestions = ['請重試或聯繫技術支援'];
+      }
+
+      const fullMessage = `❌ ${errorMessage}\n\n💡 建議解決方案:\n${suggestions.map(s => `• ${s}`).join('\n')}`;
+      setRecordingStatus(fullMessage);
+
+      // 記錄錯誤到控制台，便於調試
+      const { settings: debugSettings } = useSettingsStore.getState();
+      console.error('🔍 Gemini 轉錄詳細錯誤資訊:', {
+        error: error instanceof Error ? error.message : error,
+        stack: error instanceof Error ? error.stack : undefined,
+        settings: {
+          hasApiKey: !!debugSettings.geminiApiKey,
+          preferredModel: debugSettings.geminiPreferredModel,
+          enableFallback: debugSettings.geminiEnableFallback,
+          retryConfig: debugSettings.geminiRetryConfig
+        }
+      });
     }
   };
 

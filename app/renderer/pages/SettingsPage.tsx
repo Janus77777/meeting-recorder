@@ -4,6 +4,7 @@ import { FlagGuard } from '../components/FlagGuard';
 import { validateSettings, checkAPIHealth } from '../utils/validators';
 import { ENV_CONFIGS } from '@main/config/env';
 import { FLAGS, getEnabledFeatures, getDisabledFeatures, FEATURE_DESCRIPTIONS } from '@shared/flags';
+import { GeminiAPIClient } from '../services/geminiApi';
 
 export const SettingsPage: React.FC = () => {
   // Store hooks
@@ -16,6 +17,8 @@ export const SettingsPage: React.FC = () => {
   const [isTestingConnection, setIsTestingConnection] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
   const [hasUnsavedChanges, setHasUnsavedChanges] = useState(false);
+  const [diagnosticResult, setDiagnosticResult] = useState<any>(null);
+  const [showAdvancedGeminiSettings, setShowAdvancedGeminiSettings] = useState(false);
 
   // Update form data when settings change
   useEffect(() => {
@@ -37,7 +40,10 @@ export const SettingsPage: React.FC = () => {
     if (validationErrors.apiKey && formData.apiKey !== settings.apiKey) {
       setValidationErrors(prev => ({ ...prev, apiKey: '' }));
     }
-  }, [formData.baseURL, formData.apiKey, settings.baseURL, settings.apiKey, validationErrors]);
+    if (validationErrors.openRouterModel && formData.openRouterModel !== settings.openRouterModel) {
+      setValidationErrors(prev => ({ ...prev, openRouterModel: '' }));
+    }
+  }, [formData.baseURL, formData.apiKey, formData.openRouterModel, settings.baseURL, settings.apiKey, settings.openRouterModel, validationErrors]);
 
   // Handle form input changes
   const handleInputChange = (field: keyof typeof formData, value: any) => {
@@ -59,7 +65,19 @@ export const SettingsPage: React.FC = () => {
 
     setIsSaving(true);
     try {
-      updateSettings(formData);
+      const dataToSave = { ...formData };
+
+      if (dataToSave.useGemini === false) {
+        const baseURL = (dataToSave.openRouterBaseURL || dataToSave.baseURL || '').trim();
+        const apiKey = (dataToSave.openRouterApiKey || dataToSave.apiKey || '').trim();
+
+        dataToSave.openRouterBaseURL = baseURL;
+        dataToSave.baseURL = baseURL;
+        dataToSave.openRouterApiKey = apiKey;
+        dataToSave.apiKey = apiKey;
+      }
+
+      updateSettings(dataToSave);
       showSuccess('設定已保存');
       setHasUnsavedChanges(false);
     } catch (error) {
@@ -78,24 +96,86 @@ export const SettingsPage: React.FC = () => {
     }
   };
 
-  // Test API connection
+  // Enhanced API connection test with diagnostics
   const handleTestConnection = async () => {
     if (!validateForm()) {
       return;
     }
 
     setIsTestingConnection(true);
+    setDiagnosticResult(null);
+
     try {
-      const isHealthy = await checkAPIHealth(formData.baseURL, formData.apiKey);
-      
-      if (isHealthy) {
-        showSuccess('API 連接測試成功');
+      if (formData.useGemini && formData.geminiApiKey) {
+        // 使用增強的 Gemini API 診斷
+        const geminiClient = new GeminiAPIClient(formData.geminiApiKey, {
+          preferredModel: formData.geminiPreferredModel,
+          enableFallback: formData.geminiEnableFallback,
+          retryConfig: formData.geminiRetryConfig,
+          diagnosticMode: formData.geminiDiagnosticMode
+        });
+
+        const diagnosticResult = await geminiClient.testConnection();
+        setDiagnosticResult(diagnosticResult);
+
+        if (diagnosticResult.success) {
+          showSuccess(`✅ Gemini API 連接成功 (回應時間: ${diagnosticResult.details.responseTime}ms)`);
+        } else {
+          const errorMsg = diagnosticResult.details.errorMessage || '未知錯誤';
+          showError(`❌ Gemini API 連接失敗: ${errorMsg}`);
+        }
       } else {
-        showError('API 連接測試失敗，請檢查 URL 和金鑰');
+        // 使用原有的通用 API 健康檢查
+        const isHealthy = await checkAPIHealth(formData);
+
+        if (isHealthy) {
+          showSuccess('API 連接測試成功');
+        } else {
+          showError('API 連接測試失敗，請檢查 URL 和金鑰');
+        }
       }
     } catch (error) {
       console.error('Connection test failed:', error);
       showError('連接測試失敗：' + (error instanceof Error ? error.message : '未知錯誤'));
+      setDiagnosticResult({
+        success: false,
+        details: {
+          apiKeyValid: false,
+          modelAccessible: false,
+          responseTime: 0,
+          errorMessage: error instanceof Error ? error.message : '未知錯誤',
+          suggestedActions: ['檢查網路連接', '確認 API 金鑰正確']
+        }
+      });
+    } finally {
+      setIsTestingConnection(false);
+    }
+  };
+
+  // Test model availability
+  const handleTestModelAvailability = async () => {
+    if (!formData.geminiApiKey) {
+      showError('請先輸入 Gemini API Key');
+      return;
+    }
+
+    setIsTestingConnection(true);
+    try {
+      const geminiClient = new GeminiAPIClient(formData.geminiApiKey, {
+        diagnosticMode: formData.geminiDiagnosticMode
+      });
+
+      const availableModel = await geminiClient.findAvailableModel();
+
+      if (availableModel) {
+        showSuccess(`找到可用模型: ${availableModel}`);
+        handleInputChange('geminiPreferredModel', availableModel);
+      } else {
+        showError('沒有找到可用的模型');
+      }
+    } catch (error) {
+      console.error('Model test failed:', error);
+      showError('模型測試失敗：' + (error instanceof Error ? error.message : '未知錯誤'));
     } finally {
       setIsTestingConnection(false);
     }
@@ -103,6 +183,13 @@ export const SettingsPage: React.FC = () => {
 
   const enabledFeatures = getEnabledFeatures();
   const disabledFeatures = getDisabledFeatures();
+
+  const openRouterBaseURL = formData.openRouterBaseURL ?? formData.baseURL ?? '';
+  const openRouterApiKey = formData.openRouterApiKey ?? formData.apiKey ?? '';
+  const openRouterModel = formData.openRouterModel ?? '';
+  const openRouterFallbackModels = formData.openRouterFallbackModels ?? '';
+  const openRouterReferer = formData.openRouterReferer ?? '';
+  const openRouterTitle = formData.openRouterTitle ?? '';
 
   return (
     <div className="max-w-4xl mx-auto p-6 space-y-6">
@@ -150,13 +237,16 @@ export const SettingsPage: React.FC = () => {
           {/* Base URL */}
           <div className="mb-4">
             <label className="block text-sm font-medium text-gray-700 mb-2">
-              API 基礎網址
+              {formData.useGemini ? 'API 基礎網址' : 'OpenRouter API 基礎網址'}
             </label>
             <input
               type="url"
-              value={formData.baseURL}
-              onChange={(e) => handleInputChange('baseURL', e.target.value)}
-              placeholder="https://api.example.com"
+              value={formData.useGemini ? formData.baseURL : openRouterBaseURL}
+              onChange={(e) => {
+              handleInputChange('baseURL', e.target.value);
+              handleInputChange('openRouterBaseURL', e.target.value);
+            }}
+              placeholder={formData.useGemini ? "https://api.example.com" : "https://openrouter.ai/api/v1"}
               className={`w-full px-3 py-2 border rounded-lg focus:outline-none focus:ring-2 ${
                 validationErrors.baseURL
                   ? 'border-red-300 focus:ring-red-500'
@@ -171,16 +261,19 @@ export const SettingsPage: React.FC = () => {
           {/* API Key */}
           <div className="mb-4">
             <label className="block text-sm font-medium text-gray-700 mb-2">
-              API 金鑰
+              {formData.useGemini ? 'API 金鑰' : 'OpenRouter API Key'}
               {formData.useMock && (
                 <span className="ml-2 text-xs text-gray-500">(Mock 模式下可選)</span>
               )}
             </label>
             <input
               type="password"
-              value={formData.apiKey}
-              onChange={(e) => handleInputChange('apiKey', e.target.value)}
-              placeholder="請輸入 API 金鑰"
+              value={formData.useGemini ? formData.apiKey : openRouterApiKey}
+              onChange={(e) => {
+              handleInputChange('apiKey', e.target.value);
+              handleInputChange('openRouterApiKey', e.target.value);
+            }}
+              placeholder={formData.useGemini ? "請輸入 API 金鑰" : "請輸入 OpenRouter API Key"}
               className={`w-full px-3 py-2 border rounded-lg focus:outline-none focus:ring-2 ${
                 validationErrors.apiKey
                   ? 'border-red-300 focus:ring-red-500'
@@ -212,22 +305,262 @@ export const SettingsPage: React.FC = () => {
 
           {/* Test Connection Button */}
           {!formData.useMock && (
-            <button
-              onClick={handleTestConnection}
-              disabled={isTestingConnection}
-              className="w-full px-4 py-2 bg-gray-100 text-gray-700 rounded-lg hover:bg-gray-200 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
-            >
-              {isTestingConnection ? (
-                <div className="flex items-center justify-center">
-                  <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-gray-600 mr-2"></div>
-                  測試中...
-                </div>
-              ) : (
-                '測試 API 連接'
+            <div className="space-y-3">
+              <button
+                onClick={handleTestConnection}
+                disabled={isTestingConnection}
+                className="w-full px-4 py-2 bg-blue-500 text-white rounded-lg hover:bg-blue-600 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+              >
+                {isTestingConnection ? (
+                  <div className="flex items-center justify-center">
+                    <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-white mr-2"></div>
+                    測試中...
+                  </div>
+                ) : (
+                  '🔍 診斷 API 連接'
+                )}
+              </button>
+
+              {/* Gemini Model Test Button */}
+              {formData.useGemini && formData.geminiApiKey && (
+                <button
+                  onClick={handleTestModelAvailability}
+                  disabled={isTestingConnection}
+                  className="w-full px-4 py-2 bg-green-500 text-white rounded-lg hover:bg-green-600 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                >
+                  🧪 測試可用模型
+                </button>
               )}
-            </button>
+            </div>
+          )}
+
+          {/* Diagnostic Results */}
+          {diagnosticResult && (
+            <div className={`mt-4 p-4 rounded-lg border ${
+              diagnosticResult.success
+                ? 'bg-green-50 border-green-200'
+                : 'bg-red-50 border-red-200'
+            }`}>
+              <div className="flex items-center mb-2">
+                {diagnosticResult.success ? (
+                  <svg className="w-5 h-5 text-green-500 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
+                  </svg>
+                ) : (
+                  <svg className="w-5 h-5 text-red-500 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 14l2-2m0 0l2-2m-2 2l-2-2m2 2l2 2m7-2a9 9 0 11-18 0 9 9 0 0118 0z" />
+                  </svg>
+                )}
+                <span className={`font-medium ${
+                  diagnosticResult.success ? 'text-green-800' : 'text-red-800'
+                }`}>
+                  診斷結果
+                </span>
+              </div>
+
+              <div className="text-sm space-y-2">
+                <div className="grid grid-cols-2 gap-2">
+                  <div>
+                    <span className="text-gray-600">API Key:</span>
+                    <span className={`ml-2 ${
+                      diagnosticResult.details.apiKeyValid ? 'text-green-600' : 'text-red-600'
+                    }`}>
+                      {diagnosticResult.details.apiKeyValid ? '有效' : '無效'}
+                    </span>
+                  </div>
+                  <div>
+                    <span className="text-gray-600">模型訪問:</span>
+                    <span className={`ml-2 ${
+                      diagnosticResult.details.modelAccessible ? 'text-green-600' : 'text-red-600'
+                    }`}>
+                      {diagnosticResult.details.modelAccessible ? '可用' : '不可用'}
+                    </span>
+                  </div>
+                </div>
+
+                {diagnosticResult.details.responseTime > 0 && (
+                  <div>
+                    <span className="text-gray-600">回應時間:</span>
+                    <span className="ml-2 text-blue-600">{diagnosticResult.details.responseTime}ms</span>
+                  </div>
+                )}
+
+                {diagnosticResult.details.errorMessage && (
+                  <div>
+                    <span className="text-gray-600">錯誤信息:</span>
+                    <div className="text-red-600 text-xs mt-1 bg-red-100 p-2 rounded">
+                      {diagnosticResult.details.errorMessage}
+                    </div>
+                  </div>
+                )}
+
+                {diagnosticResult.details.suggestedActions && diagnosticResult.details.suggestedActions.length > 0 && (
+                  <div>
+                    <span className="text-gray-600">建議操作:</span>
+                    <ul className="mt-1 space-y-1">
+                      {diagnosticResult.details.suggestedActions.map((action: string, index: number) => (
+                        <li key={index} className="text-xs text-gray-700 flex items-start">
+                          <span className="mr-1">•</span>
+                          {action}
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
+              </div>
+            </div>
           )}
         </div>
+
+        {/* Gemini Advanced Settings */}
+        {formData.useGemini && (
+          <div className="bg-white rounded-lg shadow-sm p-6">
+            <div className="flex items-center justify-between mb-4">
+              <h2 className="text-xl font-semibold text-gray-800">Gemini 進階設定</h2>
+              <button
+                onClick={() => setShowAdvancedGeminiSettings(!showAdvancedGeminiSettings)}
+                className="text-blue-500 hover:text-blue-700 text-sm font-medium"
+              >
+                {showAdvancedGeminiSettings ? '隱藏' : '顯示'} 進階選項
+              </button>
+            </div>
+
+            {showAdvancedGeminiSettings && (
+              <div className="space-y-4">
+                {/* Preferred Model */}
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-2">
+                    偏好模型
+                  </label>
+                  <select
+                    value={formData.geminiPreferredModel || 'gemini-2.5-pro'}
+                    onChange={(e) => handleInputChange('geminiPreferredModel', e.target.value)}
+                    className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+                  >
+                    <option value="gemini-2.5-pro">Gemini 2.5 Pro (推薦)</option>
+                    <option value="gemini-2.5-flash">Gemini 2.5 Flash (備用)</option>
+                  </select>
+                </div>
+
+                {/* Enable Fallback */}
+                <div>
+                  <label className="flex items-center">
+                    <input
+                      type="checkbox"
+                      checked={formData.geminiEnableFallback ?? true}
+                      onChange={(e) => handleInputChange('geminiEnableFallback', e.target.checked)}
+                      className="w-4 h-4 text-blue-600 border-gray-300 rounded focus:ring-blue-500"
+                    />
+                    <span className="ml-2 text-sm font-medium text-gray-700">
+                      啟用模型 Fallback
+                    </span>
+                  </label>
+                  <p className="mt-1 text-xs text-gray-500">
+                    當主要模型不可用時自動嘗試其他模型
+                  </p>
+                </div>
+
+                {/* Diagnostic Mode */}
+                <div>
+                  <label className="flex items-center">
+                    <input
+                      type="checkbox"
+                      checked={formData.geminiDiagnosticMode ?? false}
+                      onChange={(e) => handleInputChange('geminiDiagnosticMode', e.target.checked)}
+                      className="w-4 h-4 text-blue-600 border-gray-300 rounded focus:ring-blue-500"
+                    />
+                    <span className="ml-2 text-sm font-medium text-gray-700">
+                      診斷模式
+                    </span>
+                  </label>
+                  <p className="mt-1 text-xs text-gray-500">
+                    啟用詳細的日誌記錄以便問題排查
+                  </p>
+                </div>
+
+                {/* Health Check */}
+                <div>
+                  <label className="flex items-center">
+                    <input
+                      type="checkbox"
+                      checked={formData.geminiHealthCheckEnabled ?? true}
+                      onChange={(e) => handleInputChange('geminiHealthCheckEnabled', e.target.checked)}
+                      className="w-4 h-4 text-blue-600 border-gray-300 rounded focus:ring-blue-500"
+                    />
+                    <span className="ml-2 text-sm font-medium text-gray-700">
+                      啟用 API 健康檢查
+                    </span>
+                  </label>
+                  <p className="mt-1 text-xs text-gray-500">
+                    在開始轉錄前檢查 API 是否可用
+                  </p>
+                </div>
+
+                {/* Retry Configuration */}
+                <div className="border-t pt-4">
+                  <h3 className="text-md font-medium text-gray-700 mb-3">重試配置</h3>
+
+                  <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                    <div>
+                      <label className="block text-sm font-medium text-gray-700 mb-1">
+                        最大重試次數
+                      </label>
+                      <input
+                        type="number"
+                        min="1"
+                        max="10"
+                        value={formData.geminiRetryConfig?.maxRetries ?? 5}
+                        onChange={(e) => handleInputChange('geminiRetryConfig', {
+                          ...formData.geminiRetryConfig,
+                          maxRetries: parseInt(e.target.value)
+                        })}
+                        className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+                      />
+                    </div>
+
+                    <div>
+                      <label className="block text-sm font-medium text-gray-700 mb-1">
+                        基礎延遲 (秒)
+                      </label>
+                      <input
+                        type="number"
+                        min="5"
+                        max="120"
+                        value={(formData.geminiRetryConfig?.baseDelay ?? 30000) / 1000}
+                        onChange={(e) => handleInputChange('geminiRetryConfig', {
+                          ...formData.geminiRetryConfig,
+                          baseDelay: parseInt(e.target.value) * 1000
+                        })}
+                        className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+                      />
+                    </div>
+
+                    <div className="flex items-center">
+                      <label className="flex items-center">
+                        <input
+                          type="checkbox"
+                          checked={formData.geminiRetryConfig?.enableJitter ?? true}
+                          onChange={(e) => handleInputChange('geminiRetryConfig', {
+                            ...formData.geminiRetryConfig,
+                            enableJitter: e.target.checked
+                          })}
+                          className="w-4 h-4 text-blue-600 border-gray-300 rounded focus:ring-blue-500"
+                        />
+                        <span className="ml-2 text-sm font-medium text-gray-700">
+                          隨機抖動
+                        </span>
+                      </label>
+                    </div>
+                  </div>
+
+                  <p className="mt-2 text-xs text-gray-500">
+                    配置 API 請求失敗時的重試行為
+                  </p>
+                </div>
+              </div>
+            )}
+          </div>
+        )}
 
         {/* Feature Flags */}
         <div className="bg-white rounded-lg shadow-sm p-6">

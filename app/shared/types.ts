@@ -104,6 +104,23 @@ export interface AppSettings {
   // Gemini API 設定
   useGemini?: boolean;
   geminiApiKey?: string;
+  // Gemini 進階設定
+  geminiPreferredModel?: string;          // 偏好的 Gemini 模型
+  geminiEnableFallback?: boolean;         // 啟用模型 fallback
+  geminiRetryConfig?: {
+    maxRetries?: number;                  // 最大重試次數 (預設: 5)
+    baseDelay?: number;                   // 基礎延遲毫秒 (預設: 30000)
+    enableJitter?: boolean;               // 啟用隨機抖動 (預設: true)
+  };
+  geminiDiagnosticMode?: boolean;         // 診斷模式：啟用詳細日誌
+  geminiHealthCheckEnabled?: boolean;     // 啟用 API 健康檢查
+  // OpenRouter 設定
+  openRouterApiKey?: string;
+  openRouterBaseURL?: string;
+  openRouterModel?: string;
+  openRouterFallbackModels?: string;
+  openRouterReferer?: string;
+  openRouterTitle?: string;
   // 自訂提示詞設定
   customTranscriptPrompt?: string;
   customSummaryPrompt?: string;

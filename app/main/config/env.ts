@@ -8,6 +8,22 @@ export const DEFAULT_SETTINGS: AppSettings = {
   useMock: false,
   useGemini: true,  // 預設使用Gemini
   geminiApiKey: '',
+  // Gemini 進階設定 - 預設值
+  geminiPreferredModel: 'gemini-2.5-pro',
+  geminiEnableFallback: true,
+  geminiRetryConfig: {
+    maxRetries: 5,
+    baseDelay: 30000,
+    enableJitter: true
+  },
+  geminiDiagnosticMode: false,
+  geminiHealthCheckEnabled: true,
+  openRouterApiKey: '',
+  openRouterBaseURL: 'https://openrouter.ai/api/v1',
+  openRouterModel: 'google/gemma-3n-e4b-it:free',
+  openRouterFallbackModels: '',
+  openRouterReferer: 'https://github.com/Janus77777/meeting-recorder',
+  openRouterTitle: 'Meeting Recorder',
   customTranscriptPrompt: '',
   customSummaryPrompt: '',
   vocabularyList: [],
@@ -37,6 +53,10 @@ export const ENV_CONFIGS = {
 export const getCurrentBaseURL = (settings: AppSettings): string => {
   if (settings.useMock) {
     return 'mock://api';
+  }
+
+  if (settings.useGemini === false && settings.openRouterBaseURL) {
+    return settings.openRouterBaseURL;
   }
   
   return settings.baseURL || ENV_CONFIGS[settings.environment].baseURL;

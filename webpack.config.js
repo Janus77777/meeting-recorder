@@ -4,7 +4,7 @@ const webpack = require('webpack');
 
 module.exports = {
   mode: process.env.NODE_ENV || 'development',
-  target: 'electron-renderer',
+  target: 'web',
   entry: './app/renderer/index.tsx',
   output: {
     path: path.resolve(__dirname, 'dist/renderer'),
@@ -48,6 +48,10 @@ module.exports = {
     new webpack.DefinePlugin({
       'global': 'globalThis',
       'process.env.NODE_ENV': JSON.stringify(process.env.NODE_ENV || 'development')
+    }),
+    new webpack.ProvidePlugin({
+      global: 'global',
+      process: 'process/browser'
     })
   ],
   devServer: {
