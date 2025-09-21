@@ -77,11 +77,21 @@
    ```
 
 5. **打包安裝檔**
- ```bash
-  npm run dist
-  ```
-  
-  生成的安裝檔位於 `release/` 目錄。macOS 使用者亦可執行 `npm run dist:mac` 產生 DMG 安裝檔。
+   - macOS：
+     ```bash
+     npm run dist:mac
+     ```
+     會在 `release/` 目錄產生 `會議轉錄工具-<version>-<arch>.dmg`、`latest-mac.yml` 及對應 blockmap。
+
+   - Windows：
+     ```bash
+     npm run dist:win
+     ```
+     會在 `release/` 目錄產生 `會議轉錄工具-<version>.exe`、`latest.yml` 及 blockmap，可供自動更新使用。
+
+   如需同時產出 mac + Windows 安裝檔，可執行 `npm run dist`（會依 `build` 設定一次打出所有目標）。
+
+> 📄 **Google STT 金鑰**：打包前請確認 `resources/credentials/google-stt.json` 已存在（不在 git 版控內）。mac / Windows 打包皆會將該檔複製進應用程式，使使用者下載後即可直接使用。
 
 ## 使用說明
 

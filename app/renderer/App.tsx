@@ -10,6 +10,32 @@ import { VocabularyService } from './services/vocabularyService';
 import { mergeMediaStreams, requestMicrophoneStream, requestSystemAudioStream, stopStream } from './utils/audioCapture';
 import { joinPath, normalizePath } from './utils/path';
 
+const isVersionGreater = (latest?: string, current?: string): boolean => {
+  if (!latest) {
+    return false;
+  }
+  if (!current) {
+    return true;
+  }
+
+  const latestParts = latest.split('.').map(part => parseInt(part, 10) || 0);
+  const currentParts = current.split('.').map(part => parseInt(part, 10) || 0);
+  const maxLength = Math.max(latestParts.length, currentParts.length);
+
+  for (let i = 0; i < maxLength; i += 1) {
+    const latestVal = latestParts[i] ?? 0;
+    const currentVal = currentParts[i] ?? 0;
+    if (latestVal > currentVal) {
+      return true;
+    }
+    if (latestVal < currentVal) {
+      return false;
+    }
+  }
+
+  return false;
+};
+
 const App: React.FC = () => {
   // 使用UI store管理頁面狀態
   const { currentPage, setCurrentPage } = useUIStore();
@@ -56,6 +82,14 @@ const App: React.FC = () => {
   const [appVersion, setAppVersion] = useState<string>('');
   const [platform, setPlatform] = useState<NodeJS.Platform | 'unknown'>('unknown');
   const [updateStatusMessage, setUpdateStatusMessage] = useState<string>('尚未檢查更新');
+
+  const markNoUpdateAvailable = React.useCallback((message?: string) => {
+    setUpdateAvailable(false);
+    setUpdateDownloaded(false);
+    setUpdateInfo(null);
+    setUpdateProgress(null);
+    setUpdateStatusMessage(message ?? '目前已是最新版本');
+  }, []);
 
   type AudioSegment = {
     index: number;
@@ -453,6 +487,25 @@ const App: React.FC = () => {
     }
   }, [settings]);
 
+  const detectedPlatform = React.useMemo<NodeJS.Platform | 'unknown'>(() => {
+    if (platform && platform !== 'unknown') {
+      return platform;
+    }
+
+    const userAgent = navigator?.userAgent?.toLowerCase() ?? '';
+    if (userAgent.includes('win')) {
+      return 'win32';
+    }
+    if (userAgent.includes('mac')) {
+      return 'darwin';
+    }
+    if (userAgent.includes('linux')) {
+      return 'linux';
+    }
+
+    return 'unknown';
+  }, [platform]);
+
   React.useEffect(() => {
     const detectPlatform = async () => {
       try {
@@ -462,7 +515,7 @@ const App: React.FC = () => {
           console.log('偵測到作業系統平台:', result);
         }
       } catch (error) {
-        console.warn('偵測作業系統平台失敗:', error);
+        console.warn('偵測作業系統平台失敗，使用 userAgent fallback', error);
       }
     };
 
@@ -491,12 +544,18 @@ const App: React.FC = () => {
 
     if (api?.updater) {
       api.updater.onUpdateAvailable((info) => {
-        console.log('發現新版本:', info.version);
-        setUpdateAvailable(true);
-        setUpdateDownloaded(false);
-        setUpdateInfo(info);
-        setUpdateStatusMessage(`發現新版本 ${info.version}`);
-        setUpdateProgress(null);
+        const latestVersion = info.version ?? '';
+        console.log('發現新版本:', latestVersion);
+        setUpdateInfo({ version: latestVersion, releaseNotes: info.releaseNotes });
+
+        if (!appVersion || isVersionGreater(latestVersion, appVersion)) {
+          setUpdateAvailable(true);
+          setUpdateDownloaded(false);
+          setUpdateStatusMessage(`發現新版本 ${latestVersion}`);
+          setUpdateProgress(null);
+        } else {
+          markNoUpdateAvailable(`目前已是最新版本 (v${appVersion})`);
+        }
       });
 
       api.updater.onUpdateProgress((progress) => {
@@ -518,13 +577,21 @@ const App: React.FC = () => {
       setUpdateStatusMessage('目前環境不支援自動更新');
     }
 
-  api?.app.getVersion()
+    api?.app.getVersion()
       .then((version) => setAppVersion(version))
       .catch((error) => {
         console.warn('取得應用版本失敗:', error);
         setAppVersion('');
       });
   }, []);
+
+  React.useEffect(() => {
+    if (updateInfo?.version && appVersion) {
+      if (!isVersionGreater(updateInfo.version, appVersion)) {
+        markNoUpdateAvailable(`目前已是最新版本 (v${appVersion})`);
+      }
+    }
+  }, [appVersion, updateInfo?.version, markNoUpdateAvailable]);
 
 
   const handleCheckUpdates = async () => {
@@ -539,17 +606,16 @@ const App: React.FC = () => {
       setUpdateProgress(null);
       const result = await updater.checkForUpdates();
 
-      if (result?.available) {
+      if (result?.available && isVersionGreater(result.version, appVersion)) {
+        const latestVersion = result.version ?? '';
         setUpdateAvailable(true);
         setUpdateDownloaded(false);
-        setUpdateInfo({ version: result.version ?? '' });
-        setUpdateStatusMessage(`發現新版本 ${result.version ?? ''}`.trim());
+        setUpdateInfo({ version: latestVersion });
+        setUpdateStatusMessage(`發現新版本 ${latestVersion}`);
+        setUpdateProgress(null);
       } else {
-        setUpdateAvailable(false);
-        setUpdateDownloaded(false);
-        setUpdateInfo(null);
-        const message = result?.message || '目前已是最新版本';
-        setUpdateStatusMessage(message);
+        const message = result?.message || (appVersion ? `目前已是最新版本 (v${appVersion})` : '目前已是最新版本');
+        markNoUpdateAvailable(message);
       }
     } catch (error) {
       setUpdateStatusMessage(`檢查更新失敗：${(error as Error).message}`);
@@ -700,13 +766,9 @@ const App: React.FC = () => {
       
       if (recordingMode === 'system' || recordingMode === 'both') {
         setRecordingStatus('正在獲取系統聲音權限...');
-        const resolvedPlatform = platform === 'unknown' && /mac/i.test(navigator.userAgent)
-          ? 'darwin'
-          : platform;
-
         const systemResult = await requestSystemAudioStream({
-          platform: resolvedPlatform,
-          preferDisplayCapture: resolvedPlatform === 'darwin',
+          platform: detectedPlatform,
+          preferDisplayCapture: detectedPlatform === 'darwin' || detectedPlatform === 'win32',
           logger: (message, data) => console.log(message, data ?? '')
         });
 

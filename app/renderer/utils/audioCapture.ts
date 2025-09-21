@@ -80,7 +80,7 @@ export const requestSystemAudioStream = async (
   options: SystemAudioCaptureOptions = {}
 ): Promise<SystemAudioCaptureResult> => {
   const platform = options.platform ?? 'unknown';
-  const preferDisplayCapture = options.preferDisplayCapture ?? platform === 'darwin';
+  const preferDisplayCapture = options.preferDisplayCapture ?? (platform === 'darwin' || platform === 'win32');
   const warnings: string[] = [];
 
   // Try display capture (works on macOS and modern Windows builds)
@@ -97,7 +97,7 @@ export const requestSystemAudioStream = async (
       };
 
       // On Windows we prefer audio only, but some platforms require video flag
-      if (platform !== 'darwin') {
+      if (platform !== 'darwin' && platform !== 'win32') {
         displayConstraints.video = false;
       }
 
