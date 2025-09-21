@@ -1,38 +1,327 @@
-import React, { useState, useEffect } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
+import type { CSSProperties } from 'react';
 import { useSettingsStore, useToastActions } from '../services/store';
-import { FlagGuard } from '../components/FlagGuard';
 import { validateSettings, checkAPIHealth } from '../utils/validators';
-import { ENV_CONFIGS } from '@main/config/env';
-import { FLAGS, getEnabledFeatures, getDisabledFeatures, FEATURE_DESCRIPTIONS } from '@shared/flags';
+import { DEFAULT_SETTINGS, BUILTIN_GOOGLE_STT_KEY } from '@main/config/env';
+import { getEnabledFeatures, getDisabledFeatures, FEATURE_DESCRIPTIONS } from '@shared/flags';
 import { GeminiAPIClient } from '../services/geminiApi';
+import { AppSettings, GoogleCloudSTTSettings } from '@shared/types';
+
+const containerStyle: CSSProperties = {
+  maxWidth: '960px',
+  margin: '0 auto',
+  padding: '32px 24px 48px',
+  display: 'flex',
+  flexDirection: 'column',
+  gap: '24px'
+};
+
+const headerStyle: CSSProperties = {
+  textAlign: 'center'
+};
+
+const titleStyle: CSSProperties = {
+  margin: 0,
+  fontSize: '28px',
+  fontWeight: 700,
+  color: '#1f2937'
+};
+
+const subtitleStyle: CSSProperties = {
+  margin: '8px 0 0',
+  color: '#6b7280',
+  fontSize: '15px'
+};
+
+const unsavedWarningStyle: CSSProperties = {
+  display: 'flex',
+  alignItems: 'center',
+  gap: '8px',
+  backgroundColor: '#fef3c7',
+  border: '1px solid #fcd34d',
+  color: '#92400e',
+  borderRadius: '12px',
+  padding: '14px 18px'
+};
+
+const layoutStyle: CSSProperties = {
+  display: 'flex',
+  flexWrap: 'wrap',
+  gap: '24px'
+};
+
+const columnStyle: CSSProperties = {
+  flex: '1 1 420px',
+  minWidth: '320px',
+  display: 'flex',
+  flexDirection: 'column',
+  gap: '24px'
+};
+
+const cardStyle: CSSProperties = {
+  backgroundColor: '#ffffff',
+  border: '1px solid #e5e7eb',
+  borderRadius: '12px',
+  padding: '24px',
+  boxShadow: '0 1px 2px rgba(15, 23, 42, 0.08)',
+  display: 'flex',
+  flexDirection: 'column',
+  gap: '16px'
+};
+
+const sectionTitleStyle: CSSProperties = {
+  fontSize: '18px',
+  fontWeight: 600,
+  color: '#1f2937',
+  margin: 0
+};
+
+const fieldBlockStyle: CSSProperties = {
+  display: 'flex',
+  flexDirection: 'column',
+  gap: '6px'
+};
+
+const labelStyle: CSSProperties = {
+  fontSize: '14px',
+  fontWeight: 600,
+  color: '#374151'
+};
+
+const baseInputStyle: CSSProperties = {
+  width: '100%',
+  padding: '10px 12px',
+  border: '1px solid #d1d5db',
+  borderRadius: '8px',
+  fontSize: '14px',
+  color: '#111827',
+  backgroundColor: '#ffffff',
+  outline: 'none'
+};
+
+const errorInputStyle: CSSProperties = {
+  borderColor: '#f87171',
+  boxShadow: '0 0 0 1px rgba(248, 113, 113, 0.15)'
+};
+
+const helperTextStyle: CSSProperties = {
+  fontSize: '12px',
+  color: '#6b7280'
+};
+
+const modeButtonsWrapperStyle: CSSProperties = {
+  display: 'flex',
+  flexWrap: 'wrap',
+  gap: '12px'
+};
+
+const modeButtonBase: CSSProperties = {
+  flex: '1 1 200px',
+  padding: '11px 14px',
+  borderRadius: '10px',
+  border: '1px solid #d1d5db',
+  fontSize: '14px',
+  fontWeight: 600,
+  cursor: 'pointer',
+  backgroundColor: '#ffffff',
+  color: '#4b5563',
+  transition: 'all 0.2s ease',
+  display: 'flex',
+  alignItems: 'center',
+  justifyContent: 'center',
+  gap: '8px'
+};
+
+const buttonPalette = {
+  blue: {
+    background: '#2563eb',
+    border: '#1d4ed8',
+    hover: '#1d4ed8',
+    shadow: 'rgba(37, 99, 235, 0.28)'
+  },
+  amber: {
+    background: '#f59e0b',
+    border: '#d97706',
+    hover: '#d97706',
+    shadow: 'rgba(245, 158, 11, 0.26)'
+  },
+  green: {
+    background: '#10b981',
+    border: '#0f766e',
+    hover: '#047857',
+    shadow: 'rgba(16, 185, 129, 0.24)'
+  },
+  gray: {
+    background: '#6b7280',
+    border: '#4b5563',
+    hover: '#4b5563',
+    shadow: 'rgba(107, 114, 128, 0.2)'
+  }
+} as const;
+
+const resolveGeminiKey = (settings: AppSettings): string | undefined => {
+  if (settings.geminiApiKey && settings.geminiApiKey.trim()) {
+    return settings.geminiApiKey;
+  }
+  if (settings.apiKey && settings.apiKey.trim()) {
+    return settings.apiKey;
+  }
+  return undefined;
+};
+
+const fullWidthButtonBase: CSSProperties = {
+  width: '100%',
+  padding: '12px',
+  borderRadius: '10px',
+  border: 'none',
+  fontSize: '15px',
+  fontWeight: 600,
+  display: 'flex',
+  alignItems: 'center',
+  justifyContent: 'center',
+  gap: '8px',
+  cursor: 'pointer',
+  transition: 'all 0.2s ease'
+};
+
+const twoColumnGridStyle: CSSProperties = {
+  display: 'grid',
+  gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))',
+  gap: '12px'
+};
+
+const featureItemStyle: CSSProperties = {
+  display: 'flex',
+  alignItems: 'center',
+  gap: '12px',
+  padding: '12px 14px',
+  borderRadius: '10px',
+  border: '1px solid #e5e7eb',
+  backgroundColor: '#f9fafb'
+};
+
+const applicationInfoGridStyle: CSSProperties = {
+  display: 'grid',
+  gridTemplateColumns: 'repeat(auto-fit, minmax(160px, 1fr))',
+  gap: '16px',
+  fontSize: '14px'
+};
+
+const actionRowStyle: CSSProperties = {
+  display: 'flex',
+  justifyContent: 'center',
+  gap: '16px',
+  flexWrap: 'wrap'
+};
+
+const helpBoxStyle: CSSProperties = {
+  backgroundColor: '#eff6ff',
+  border: '1px solid #bfdbfe',
+  color: '#1d4ed8',
+  borderRadius: '12px',
+  padding: '20px'
+};
+
+const mergeStyles = (...styles: Array<CSSProperties | undefined>) => {
+  const result: CSSProperties = {};
+  for (const style of styles) {
+    Object.assign(result, style);
+  }
+  return result;
+};
+
+const modeButtonStyle = (active: boolean, variant: 'gemini' | 'stt'): CSSProperties => {
+  if (!active) {
+    return modeButtonBase;
+  }
+  const palette = variant === 'gemini' ? buttonPalette.blue : buttonPalette.amber;
+  return {
+    ...modeButtonBase,
+    backgroundColor: palette.background,
+    borderColor: palette.border,
+    color: '#ffffff',
+    boxShadow: `0 10px 22px ${palette.shadow}`
+  };
+};
+
+const buildFilledButtonStyle = (variant: keyof typeof buttonPalette, disabled?: boolean): CSSProperties => {
+  const palette = buttonPalette[variant];
+  return {
+    ...fullWidthButtonBase,
+    backgroundColor: disabled ? '#9ca3af' : palette.background,
+    boxShadow: disabled ? 'none' : `0 8px 18px ${palette.shadow}`,
+    opacity: disabled ? 0.6 : 1,
+    cursor: disabled ? 'not-allowed' : 'pointer',
+    color: '#ffffff'
+  };
+};
+
+const secondaryButtonStyle: CSSProperties = {
+  padding: '12px 24px',
+  borderRadius: '10px',
+  border: '1px solid #d1d5db',
+  backgroundColor: '#ffffff',
+  color: '#374151',
+  fontWeight: 600,
+  fontSize: '15px',
+  cursor: 'pointer'
+};
+
+const featureIcon = (color: string) => ({
+  width: '8px',
+  height: '8px',
+  borderRadius: '50%',
+  backgroundColor: color
+});
 
 export const SettingsPage: React.FC = () => {
-  // Store hooks
   const { settings, updateSettings, resetSettings } = useSettingsStore();
   const { showError, showSuccess, showInfo } = useToastActions();
 
-  // Local state
-  const [formData, setFormData] = useState(settings);
+  const mergeSettingsWithDefaults = useMemo(() => {
+    const defaults = DEFAULT_SETTINGS.googleCloudSTT ?? {
+      enabled: false,
+      projectId: '',
+      location: 'global',
+      recognizerId: '',
+      keyFilePath: BUILTIN_GOOGLE_STT_KEY,
+      languageCode: 'zh-TW',
+      model: 'latest_long',
+      enableSpeakerDiarization: true,
+      minSpeakerCount: 1,
+      maxSpeakerCount: 6
+    };
+
+    return (source: AppSettings): AppSettings => ({
+      ...source,
+      transcriptionMode: source.transcriptionMode ?? 'gemini_direct',
+      googleCloudSTT: {
+        ...defaults,
+        ...(source.googleCloudSTT ?? {})
+      }
+    });
+  }, []);
+
+  const [formData, setFormData] = useState<AppSettings>(mergeSettingsWithDefaults(settings));
   const [validationErrors, setValidationErrors] = useState<Record<string, string>>({});
   const [isTestingConnection, setIsTestingConnection] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
   const [hasUnsavedChanges, setHasUnsavedChanges] = useState(false);
   const [diagnosticResult, setDiagnosticResult] = useState<any>(null);
   const [showAdvancedGeminiSettings, setShowAdvancedGeminiSettings] = useState(false);
+  const [isTestingSTT, setIsTestingSTT] = useState(false);
+  const [sttTestResult, setSttTestResult] = useState<{ success: boolean; message: string } | null>(null);
 
-  // Update form data when settings change
   useEffect(() => {
-    setFormData(settings);
+    setFormData(mergeSettingsWithDefaults(settings));
     setHasUnsavedChanges(false);
-  }, [settings]);
+  }, [settings, mergeSettingsWithDefaults]);
 
-  // Check for unsaved changes
   useEffect(() => {
     const hasChanges = JSON.stringify(formData) !== JSON.stringify(settings);
     setHasUnsavedChanges(hasChanges);
   }, [formData, settings]);
 
-  // Clear validation errors when inputs change
   useEffect(() => {
     if (validationErrors.baseURL && formData.baseURL !== settings.baseURL) {
       setValidationErrors(prev => ({ ...prev, baseURL: '' }));
@@ -40,24 +329,46 @@ export const SettingsPage: React.FC = () => {
     if (validationErrors.apiKey && formData.apiKey !== settings.apiKey) {
       setValidationErrors(prev => ({ ...prev, apiKey: '' }));
     }
-    if (validationErrors.openRouterModel && formData.openRouterModel !== settings.openRouterModel) {
-      setValidationErrors(prev => ({ ...prev, openRouterModel: '' }));
-    }
-  }, [formData.baseURL, formData.apiKey, formData.openRouterModel, settings.baseURL, settings.apiKey, settings.openRouterModel, validationErrors]);
+  }, [formData.baseURL, formData.apiKey, settings.baseURL, settings.apiKey, validationErrors]);
 
-  // Handle form input changes
-  const handleInputChange = (field: keyof typeof formData, value: any) => {
+  const handleInputChange = (field: keyof AppSettings, value: any) => {
+    if (field === 'transcriptionMode') {
+      const mode = value as AppSettings['transcriptionMode'];
+      setFormData(prev => ({
+        ...prev,
+        transcriptionMode: mode,
+        useGemini: true,
+        googleCloudSTT: {
+          ...(prev.googleCloudSTT ?? defaultGoogleStt),
+          enabled: mode === 'hybrid_stt'
+        }
+      }));
+      setValidationErrors(prev => ({ ...prev, transcriptionMode: '' }));
+      setSttTestResult(null);
+      return;
+    }
+
     setFormData(prev => ({ ...prev, [field]: value }));
   };
 
-  // Validate form data
+  const handleGoogleSttChange = (field: keyof GoogleCloudSTTSettings, value: any) => {
+    setFormData(prev => ({
+      ...prev,
+      googleCloudSTT: {
+        ...(prev.googleCloudSTT ?? defaultGoogleStt),
+        [field]: value
+      }
+    }));
+    const errorKey = `googleCloudSTT.${field}`;
+    setValidationErrors(prev => ({ ...prev, [errorKey]: '' }));
+  };
+
   const validateForm = (): boolean => {
     const validation = validateSettings(formData);
     setValidationErrors(validation.errors);
     return validation.isValid;
   };
 
-  // Save settings
   const handleSave = async () => {
     if (!validateForm()) {
       return;
@@ -65,17 +376,14 @@ export const SettingsPage: React.FC = () => {
 
     setIsSaving(true);
     try {
-      const dataToSave = { ...formData };
-
-      if (dataToSave.useGemini === false) {
-        const baseURL = (dataToSave.openRouterBaseURL || dataToSave.baseURL || '').trim();
-        const apiKey = (dataToSave.openRouterApiKey || dataToSave.apiKey || '').trim();
-
-        dataToSave.openRouterBaseURL = baseURL;
-        dataToSave.baseURL = baseURL;
-        dataToSave.openRouterApiKey = apiKey;
-        dataToSave.apiKey = apiKey;
-      }
+      const dataToSave: AppSettings = {
+        ...formData,
+        transcriptionMode: formData.transcriptionMode ?? 'gemini_direct',
+        googleCloudSTT: {
+          ...(formData.googleCloudSTT ?? mergeSettingsWithDefaults(settings).googleCloudSTT),
+          enabled: (formData.transcriptionMode ?? 'gemini_direct') === 'hybrid_stt'
+        }
+      };
 
       updateSettings(dataToSave);
       showSuccess('設定已保存');
@@ -88,7 +396,6 @@ export const SettingsPage: React.FC = () => {
     }
   };
 
-  // Reset settings to default
   const handleReset = () => {
     if (confirm('確定要重置所有設定嗎？這將清除所有自定義配置。')) {
       resetSettings();
@@ -96,8 +403,12 @@ export const SettingsPage: React.FC = () => {
     }
   };
 
-  // Enhanced API connection test with diagnostics
   const handleTestConnection = async () => {
+    if (formData.transcriptionMode === 'hybrid_stt') {
+      await handleTestGoogleSTT();
+      return;
+    }
+
     if (!validateForm()) {
       return;
     }
@@ -106,26 +417,25 @@ export const SettingsPage: React.FC = () => {
     setDiagnosticResult(null);
 
     try {
-      if (formData.useGemini && formData.geminiApiKey) {
-        // 使用增強的 Gemini API 診斷
-        const geminiClient = new GeminiAPIClient(formData.geminiApiKey, {
+      const geminiKey = resolveGeminiKey(formData);
+      if (formData.useGemini && geminiKey) {
+        const geminiClient = new GeminiAPIClient(geminiKey, {
           preferredModel: formData.geminiPreferredModel,
           enableFallback: formData.geminiEnableFallback,
           retryConfig: formData.geminiRetryConfig,
           diagnosticMode: formData.geminiDiagnosticMode
         });
 
-        const diagnosticResult = await geminiClient.testConnection();
-        setDiagnosticResult(diagnosticResult);
+        const result = await geminiClient.testConnection();
+        setDiagnosticResult(result);
 
-        if (diagnosticResult.success) {
-          showSuccess(`✅ Gemini API 連接成功 (回應時間: ${diagnosticResult.details.responseTime}ms)`);
+        if (result.success) {
+          showSuccess(`✅ Gemini API 連接成功 (回應時間: ${result.details.responseTime}ms)`);
         } else {
-          const errorMsg = diagnosticResult.details.errorMessage || '未知錯誤';
+          const errorMsg = result.details.errorMessage || '未知錯誤';
           showError(`❌ Gemini API 連接失敗: ${errorMsg}`);
         }
       } else {
-        // 使用原有的通用 API 健康檢查
         const isHealthy = await checkAPIHealth(formData);
 
         if (isHealthy) {
@@ -152,16 +462,21 @@ export const SettingsPage: React.FC = () => {
     }
   };
 
-  // Test model availability
   const handleTestModelAvailability = async () => {
-    if (!formData.geminiApiKey) {
-      showError('請先輸入 Gemini API Key');
+    if (formData.transcriptionMode === 'hybrid_stt') {
+      showInfo('混合模式下仍會使用 Gemini 做摘要，請在上方填寫 API 金鑰後改用「診斷 API 連接」按鈕即可。');
+      return;
+    }
+
+    const geminiKey = resolveGeminiKey(formData);
+    if (!geminiKey) {
+      showError('請先輸入 API 金鑰');
       return;
     }
 
     setIsTestingConnection(true);
     try {
-      const geminiClient = new GeminiAPIClient(formData.geminiApiKey, {
+      const geminiClient = new GeminiAPIClient(geminiKey, {
         diagnosticMode: formData.geminiDiagnosticMode
       });
 
@@ -183,480 +498,577 @@ export const SettingsPage: React.FC = () => {
 
   const enabledFeatures = getEnabledFeatures();
   const disabledFeatures = getDisabledFeatures();
+  const transcriptionMode = formData.transcriptionMode ?? 'gemini_direct';
 
-  const openRouterBaseURL = formData.openRouterBaseURL ?? formData.baseURL ?? '';
-  const openRouterApiKey = formData.openRouterApiKey ?? formData.apiKey ?? '';
-  const openRouterModel = formData.openRouterModel ?? '';
-  const openRouterFallbackModels = formData.openRouterFallbackModels ?? '';
-  const openRouterReferer = formData.openRouterReferer ?? '';
-  const openRouterTitle = formData.openRouterTitle ?? '';
+  const defaultGoogleStt = useMemo<GoogleCloudSTTSettings>(() => {
+    const merged = mergeSettingsWithDefaults(DEFAULT_SETTINGS);
+    return (merged.googleCloudSTT ?? {
+      enabled: false,
+      projectId: '',
+      location: 'global',
+      recognizerId: '',
+      keyFilePath: '',
+      languageCode: 'zh-TW',
+      model: 'latest_long',
+      enableSpeakerDiarization: true,
+      minSpeakerCount: 1,
+      maxSpeakerCount: 6
+    }) as GoogleCloudSTTSettings;
+  }, [mergeSettingsWithDefaults]);
 
-  return (
-    <div className="max-w-4xl mx-auto p-6 space-y-6">
-      {/* Header */}
-      <div className="text-center mb-8">
-        <h1 className="text-3xl font-bold text-gray-800 mb-2">應用設定</h1>
-        <p className="text-gray-600">配置 API 連接和應用程式偏好設定</p>
+  const googleSttSettings = useMemo<GoogleCloudSTTSettings>(() => ({
+    ...defaultGoogleStt,
+    ...(formData.googleCloudSTT ?? {})
+  }), [defaultGoogleStt, formData.googleCloudSTT]);
+
+  const handleTestGoogleSTT = async () => {
+    if (!window?.electronAPI?.stt) {
+      showError('目前無法進行 Google STT 測試，請確認應用已載入最新版本');
+      return;
+    }
+
+    try {
+      setIsTestingSTT(true);
+      setSttTestResult(null);
+
+      const result = await window.electronAPI.stt.initialize({
+        projectId: googleSttSettings.projectId ?? '',
+        location: googleSttSettings.location ?? '',
+        recognizerId: googleSttSettings.recognizerId ?? '',
+        keyFilePath: googleSttSettings.keyFilePath ?? ''
+      });
+
+      if (result.success) {
+        setSttTestResult({ success: true, message: 'Google STT 初始化成功' });
+        showSuccess('Google STT 初始化成功');
+      } else {
+        const message = result.error || '初始化失敗，請檢查設定';
+        setSttTestResult({ success: false, message });
+        showError(message);
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Google STT 測試失敗';
+      setSttTestResult({ success: false, message });
+      showError(message);
+    } finally {
+      setIsTestingSTT(false);
+    }
+  };
+
+  const renderValidationMessage = (key: string) => {
+    if (!validationErrors[key]) {
+      return null;
+    }
+    return (
+      <span style={{ fontSize: '12px', color: '#dc2626' }}>{validationErrors[key]}</span>
+    );
+  };
+
+  const renderDiagnosticResult = () => {
+    if (transcriptionMode !== 'gemini_direct' || !diagnosticResult) {
+      return null;
+    }
+
+    const success = Boolean(diagnosticResult.success);
+    return (
+      <div
+        style={mergeStyles(
+          cardStyle,
+          {
+            borderColor: success ? '#bbf7d0' : '#fecaca',
+            backgroundColor: success ? '#ecfdf5' : '#fef2f2',
+            gap: '12px'
+          }
+        )}
+      >
+        <div style={{ display: 'flex', alignItems: 'center', gap: '8px', fontWeight: 600, color: success ? '#047857' : '#b91c1c' }}>
+          <span>{success ? '✅ 診斷結果正常' : '⚠️ 診斷結果異常'}</span>
+        </div>
+
+        <div style={twoColumnGridStyle}>
+          <div style={{ fontSize: '13px', color: '#374151' }}>
+            <span>API Key：</span>
+            <strong style={{ marginLeft: '8px', color: diagnosticResult.details.apiKeyValid ? '#047857' : '#b91c1c' }}>
+              {diagnosticResult.details.apiKeyValid ? '有效' : '無效'}
+            </strong>
+          </div>
+          <div style={{ fontSize: '13px', color: '#374151' }}>
+            <span>模型訪問：</span>
+            <strong style={{ marginLeft: '8px', color: diagnosticResult.details.modelAccessible ? '#047857' : '#b91c1c' }}>
+              {diagnosticResult.details.modelAccessible ? '可用' : '不可用'}
+            </strong>
+          </div>
+          {diagnosticResult.details.responseTime > 0 && (
+            <div style={{ fontSize: '13px', color: '#1d4ed8' }}>
+              回應時間：{diagnosticResult.details.responseTime}ms
+            </div>
+          )}
+        </div>
+
+        {diagnosticResult.details.errorMessage && (
+          <div style={{ fontSize: '12px', color: '#b91c1c', backgroundColor: '#fee2e2', borderRadius: '8px', padding: '8px 10px' }}>
+            {diagnosticResult.details.errorMessage}
+          </div>
+        )}
+
+        {diagnosticResult.details.suggestedActions && diagnosticResult.details.suggestedActions.length > 0 && (
+          <div>
+            <div style={{ fontSize: '13px', color: '#374151', marginBottom: '4px' }}>建議操作：</div>
+            <ul style={{ margin: 0, paddingLeft: '18px', fontSize: '12px', color: '#4b5563' }}>
+              {diagnosticResult.details.suggestedActions.map((action: string, index: number) => (
+                <li key={index}>{action}</li>
+              ))}
+            </ul>
+          </div>
+        )}
       </div>
+    );
+  };
 
-      {/* Unsaved Changes Warning */}
-      {hasUnsavedChanges && (
-        <div className="bg-yellow-50 border border-yellow-200 rounded-lg p-4">
-          <div className="flex items-center">
-            <svg className="w-5 h-5 text-yellow-400 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-2.5L13.732 4c-.77-.833-1.98-.833-2.75 0L4.064 12.5C3.294 14.333 4.256 16 5.794 16z" />
-            </svg>
-            <span className="text-yellow-700">您有未保存的變更</span>
+  const renderFeatureList = () => (
+    <div style={cardStyle}>
+      <h2 style={sectionTitleStyle}>功能狀態</h2>
+      {enabledFeatures.length > 0 && (
+        <div>
+          <h3 style={{ fontSize: '15px', color: '#047857', marginBottom: '12px' }}>已啟用功能</h3>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+            {enabledFeatures.map(flag => (
+              <div key={flag} style={mergeStyles(featureItemStyle, { borderColor: '#bbf7d0', backgroundColor: '#ecfdf5', color: '#047857' })}>
+                <div style={featureIcon('#047857')} />
+                <span style={{ flex: 1, fontSize: '13px' }}>{FEATURE_DESCRIPTIONS[flag]}</span>
+                <span>✅</span>
+              </div>
+            ))}
           </div>
         </div>
       )}
 
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-        {/* API Settings */}
-        <div className="bg-white rounded-lg shadow-sm p-6">
-          <h2 className="text-xl font-semibold text-gray-800 mb-4">API 設定</h2>
-          
-          {/* Environment Selection */}
-          <div className="mb-4">
-            <label className="block text-sm font-medium text-gray-700 mb-2">
-              環境
-            </label>
-            <select
-              value={formData.environment}
-              onChange={(e) => handleInputChange('environment', e.target.value)}
-              className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
-            >
-              {Object.entries(ENV_CONFIGS).map(([key, config]) => (
-                <option key={key} value={key}>
-                  {config.name} ({config.baseURL})
-                </option>
-              ))}
-            </select>
+      {disabledFeatures.length > 0 && (
+        <div>
+          <h3 style={{ fontSize: '15px', color: '#6b7280', margin: '16px 0 12px' }}>即將推出</h3>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+            {disabledFeatures.map(flag => (
+              <div key={flag} style={mergeStyles(featureItemStyle, { opacity: 0.75 })}>
+                <div style={featureIcon('#9ca3af')} />
+                <span style={{ flex: 1, fontSize: '13px', color: '#4b5563' }}>{FEATURE_DESCRIPTIONS[flag]}</span>
+                <span>🔒</span>
+              </div>
+            ))}
           </div>
+        </div>
+      )}
+    </div>
+  );
 
-          {/* Base URL */}
-          <div className="mb-4">
-            <label className="block text-sm font-medium text-gray-700 mb-2">
-              {formData.useGemini ? 'API 基礎網址' : 'OpenRouter API 基礎網址'}
-            </label>
-            <input
-              type="url"
-              value={formData.useGemini ? formData.baseURL : openRouterBaseURL}
-              onChange={(e) => {
-              handleInputChange('baseURL', e.target.value);
-              handleInputChange('openRouterBaseURL', e.target.value);
-            }}
-              placeholder={formData.useGemini ? "https://api.example.com" : "https://openrouter.ai/api/v1"}
-              className={`w-full px-3 py-2 border rounded-lg focus:outline-none focus:ring-2 ${
-                validationErrors.baseURL
-                  ? 'border-red-300 focus:ring-red-500'
-                  : 'border-gray-300 focus:ring-blue-500'
-              }`}
-            />
-            {validationErrors.baseURL && (
-              <p className="mt-1 text-sm text-red-600">{validationErrors.baseURL}</p>
-            )}
+  const renderApplicationInfo = () => {
+    const modeLabel = transcriptionMode === 'hybrid_stt' ? 'Google STT + Gemini' : 'Gemini 直接轉錄';
+    return (
+      <div style={cardStyle}>
+        <h2 style={sectionTitleStyle}>應用程式資訊</h2>
+        <div style={applicationInfoGridStyle}>
+          <div>
+            <div style={{ color: '#6b7280', marginBottom: '4px' }}>版本</div>
+            <div style={{ fontWeight: 600 }}>1.1.5</div>
           </div>
-
-          {/* API Key */}
-          <div className="mb-4">
-            <label className="block text-sm font-medium text-gray-700 mb-2">
-              {formData.useGemini ? 'API 金鑰' : 'OpenRouter API Key'}
-              {formData.useMock && (
-                <span className="ml-2 text-xs text-gray-500">(Mock 模式下可選)</span>
-              )}
-            </label>
-            <input
-              type="password"
-              value={formData.useGemini ? formData.apiKey : openRouterApiKey}
-              onChange={(e) => {
-              handleInputChange('apiKey', e.target.value);
-              handleInputChange('openRouterApiKey', e.target.value);
-            }}
-              placeholder={formData.useGemini ? "請輸入 API 金鑰" : "請輸入 OpenRouter API Key"}
-              className={`w-full px-3 py-2 border rounded-lg focus:outline-none focus:ring-2 ${
-                validationErrors.apiKey
-                  ? 'border-red-300 focus:ring-red-500'
-                  : 'border-gray-300 focus:ring-blue-500'
-              }`}
-            />
-            {validationErrors.apiKey && (
-              <p className="mt-1 text-sm text-red-600">{validationErrors.apiKey}</p>
-            )}
+          <div>
+            <div style={{ color: '#6b7280', marginBottom: '4px' }}>API 基礎網址</div>
+            <div style={{ fontWeight: 600 }}>{formData.baseURL || '未設定'}</div>
           </div>
+          <div>
+            <div style={{ color: '#6b7280', marginBottom: '4px' }}>轉錄模式</div>
+            <div style={{ fontWeight: 600 }}>{modeLabel}</div>
+          </div>
+          {formData.geminiPreferredModel && (
+            <div>
+              <div style={{ color: '#6b7280', marginBottom: '4px' }}>Gemini 模型</div>
+              <div style={{ fontWeight: 600 }}>{formData.geminiPreferredModel}</div>
+            </div>
+          )}
+        </div>
+      </div>
+    );
+  };
 
-          {/* Mock Mode Toggle */}
-          <div className="mb-6">
-            <label className="flex items-center">
+  return (
+    <div style={containerStyle}>
+      <div style={headerStyle}>
+        <h1 style={titleStyle}>應用設定</h1>
+        <p style={subtitleStyle}>配置 API 連接和應用程式偏好設定</p>
+      </div>
+
+      {hasUnsavedChanges && (
+        <div style={unsavedWarningStyle}>
+          <span role="img" aria-label="warning">⚠️</span>
+          <span>您有未保存的變更</span>
+        </div>
+      )}
+
+      <div style={layoutStyle}>
+        <div style={columnStyle}>
+          <div style={cardStyle}>
+            <h2 style={sectionTitleStyle}>API 與轉錄設定</h2>
+
+            <div style={fieldBlockStyle}>
+              <span style={labelStyle}>轉錄模式</span>
+              <div style={modeButtonsWrapperStyle}>
+                <button
+                  type="button"
+                  onClick={() => handleInputChange('transcriptionMode', 'gemini_direct')}
+                  style={modeButtonStyle(transcriptionMode === 'gemini_direct', 'gemini')}
+                >
+                  🤖 Gemini 直接轉錄
+                </button>
+                <button
+                  type="button"
+                  onClick={() => handleInputChange('transcriptionMode', 'hybrid_stt')}
+                  style={modeButtonStyle(transcriptionMode === 'hybrid_stt', 'stt')}
+                >
+                  🎧 Google STT + Gemini
+                </button>
+              </div>
+              <p style={helperTextStyle}>
+                Gemini 直接轉錄：使用 Google Gemini 2.5 Pro 完成逐字稿與摘要。<br />
+                Google STT + Gemini：先以 Google Speech-to-Text 取得逐字稿，再交由 Gemini 生成摘要。
+              </p>
+            </div>
+
+            <div style={fieldBlockStyle}>
+              <span style={labelStyle}>API 基礎網址</span>
               <input
-                type="checkbox"
-                checked={formData.useMock}
-                onChange={(e) => handleInputChange('useMock', e.target.checked)}
-                className="w-4 h-4 text-blue-600 border-gray-300 rounded focus:ring-blue-500"
+                type="url"
+                value={formData.baseURL}
+                onChange={(e) => handleInputChange('baseURL', e.target.value)}
+                placeholder="https://api.example.com"
+                style={mergeStyles(baseInputStyle, validationErrors.baseURL ? errorInputStyle : undefined)}
               />
-              <span className="ml-2 text-sm font-medium text-gray-700">
-                使用 Mock 模式 (測試用)
-              </span>
-            </label>
-            <p className="mt-1 text-xs text-gray-500">
-              啟用後將使用模擬資料，不會發送實際 API 請求
-            </p>
-          </div>
+              {renderValidationMessage('baseURL')}
+            </div>
 
-          {/* Test Connection Button */}
-          {!formData.useMock && (
-            <div className="space-y-3">
+            <div style={fieldBlockStyle}>
+              <span style={labelStyle}>API 金鑰</span>
+              <input
+                type="password"
+                value={formData.apiKey}
+                onChange={(e) => handleInputChange('apiKey', e.target.value)}
+                placeholder="請輸入 API 金鑰"
+                style={mergeStyles(baseInputStyle, validationErrors.apiKey ? errorInputStyle : undefined)}
+              />
+              {renderValidationMessage('apiKey')}
+            </div>
+
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
               <button
+                type="button"
                 onClick={handleTestConnection}
-                disabled={isTestingConnection}
-                className="w-full px-4 py-2 bg-blue-500 text-white rounded-lg hover:bg-blue-600 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                disabled={transcriptionMode === 'hybrid_stt' ? isTestingSTT : isTestingConnection}
+                style={buildFilledButtonStyle(transcriptionMode === 'hybrid_stt' ? 'amber' : 'blue', transcriptionMode === 'hybrid_stt' ? isTestingSTT : isTestingConnection)}
               >
-                {isTestingConnection ? (
-                  <div className="flex items-center justify-center">
-                    <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-white mr-2"></div>
-                    測試中...
-                  </div>
-                ) : (
-                  '🔍 診斷 API 連接'
-                )}
+                {transcriptionMode === 'hybrid_stt'
+                  ? (isTestingSTT ? '測試中…' : '🔍 測試 Google STT 設定')
+                  : (isTestingConnection ? '診斷中…' : '🔍 診斷 Gemini API 連接')}
               </button>
 
-              {/* Gemini Model Test Button */}
-              {formData.useGemini && formData.geminiApiKey && (
+              {transcriptionMode === 'gemini_direct' && resolveGeminiKey(formData) && (
                 <button
+                  type="button"
                   onClick={handleTestModelAvailability}
                   disabled={isTestingConnection}
-                  className="w-full px-4 py-2 bg-green-500 text-white rounded-lg hover:bg-green-600 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                  style={buildFilledButtonStyle('green', isTestingConnection)}
                 >
                   🧪 測試可用模型
                 </button>
               )}
             </div>
-          )}
 
-          {/* Diagnostic Results */}
-          {diagnosticResult && (
-            <div className={`mt-4 p-4 rounded-lg border ${
-              diagnosticResult.success
-                ? 'bg-green-50 border-green-200'
-                : 'bg-red-50 border-red-200'
-            }`}>
-              <div className="flex items-center mb-2">
-                {diagnosticResult.success ? (
-                  <svg className="w-5 h-5 text-green-500 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
-                  </svg>
-                ) : (
-                  <svg className="w-5 h-5 text-red-500 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 14l2-2m0 0l2-2m-2 2l-2-2m2 2l2 2m7-2a9 9 0 11-18 0 9 9 0 0118 0z" />
-                  </svg>
-                )}
-                <span className={`font-medium ${
-                  diagnosticResult.success ? 'text-green-800' : 'text-red-800'
-                }`}>
-                  診斷結果
-                </span>
+            {transcriptionMode === 'hybrid_stt' && sttTestResult && (
+              <div style={{ fontSize: '13px', color: sttTestResult.success ? '#047857' : '#b45309' }}>
+                {sttTestResult.success ? '✅ ' : '⚠️ '}
+                {sttTestResult.message}
               </div>
+            )}
 
-              <div className="text-sm space-y-2">
-                <div className="grid grid-cols-2 gap-2">
-                  <div>
-                    <span className="text-gray-600">API Key:</span>
-                    <span className={`ml-2 ${
-                      diagnosticResult.details.apiKeyValid ? 'text-green-600' : 'text-red-600'
-                    }`}>
-                      {diagnosticResult.details.apiKeyValid ? '有效' : '無效'}
-                    </span>
-                  </div>
-                  <div>
-                    <span className="text-gray-600">模型訪問:</span>
-                    <span className={`ml-2 ${
-                      diagnosticResult.details.modelAccessible ? 'text-green-600' : 'text-red-600'
-                    }`}>
-                      {diagnosticResult.details.modelAccessible ? '可用' : '不可用'}
-                    </span>
+            {transcriptionMode === 'hybrid_stt' && (
+              <div
+                style={{
+                  marginTop: '8px',
+                  border: '1px solid #fcd34d',
+                  backgroundColor: '#fffbeb',
+                  borderRadius: '12px',
+                  padding: '18px',
+                  display: 'flex',
+                  flexDirection: 'column',
+                  gap: '14px'
+                }}
+              >
+                <div>
+                  <div style={{ fontWeight: 600, color: '#b45309', marginBottom: '6px' }}>Google STT 連線設定</div>
+                  <div style={{ fontSize: '12px', color: '#92400e' }}>
+                    請填寫 Google Cloud Speech-to-Text v2 所需資訊，建議先建立 Recognizer 並下載 Service Account JSON。
                   </div>
                 </div>
 
-                {diagnosticResult.details.responseTime > 0 && (
-                  <div>
-                    <span className="text-gray-600">回應時間:</span>
-                    <span className="ml-2 text-blue-600">{diagnosticResult.details.responseTime}ms</span>
+                <div style={twoColumnGridStyle}>
+                  <div style={fieldBlockStyle}>
+                    <span style={labelStyle}>Project ID</span>
+                    <input
+                      type="text"
+                      value={googleSttSettings.projectId ?? ''}
+                      onChange={(e) => handleGoogleSttChange('projectId', e.target.value)}
+                      placeholder="my-gcp-project"
+                      style={mergeStyles(baseInputStyle, validationErrors['googleCloudSTT.projectId'] ? errorInputStyle : undefined)}
+                    />
+                    {renderValidationMessage('googleCloudSTT.projectId')}
                   </div>
-                )}
 
-                {diagnosticResult.details.errorMessage && (
-                  <div>
-                    <span className="text-gray-600">錯誤信息:</span>
-                    <div className="text-red-600 text-xs mt-1 bg-red-100 p-2 rounded">
-                      {diagnosticResult.details.errorMessage}
-                    </div>
+                  <div style={fieldBlockStyle}>
+                    <span style={labelStyle}>Location</span>
+                    <input
+                      type="text"
+                      value={googleSttSettings.location ?? ''}
+                      onChange={(e) => handleGoogleSttChange('location', e.target.value)}
+                      placeholder="global / us-west1 ..."
+                      style={mergeStyles(baseInputStyle, validationErrors['googleCloudSTT.location'] ? errorInputStyle : undefined)}
+                    />
+                    {renderValidationMessage('googleCloudSTT.location')}
                   </div>
-                )}
 
-                {diagnosticResult.details.suggestedActions && diagnosticResult.details.suggestedActions.length > 0 && (
-                  <div>
-                    <span className="text-gray-600">建議操作:</span>
-                    <ul className="mt-1 space-y-1">
-                      {diagnosticResult.details.suggestedActions.map((action: string, index: number) => (
-                        <li key={index} className="text-xs text-gray-700 flex items-start">
-                          <span className="mr-1">•</span>
-                          {action}
-                        </li>
-                      ))}
-                    </ul>
+                  <div style={fieldBlockStyle}>
+                    <span style={labelStyle}>Recognizer ID</span>
+                    <input
+                      type="text"
+                      value={googleSttSettings.recognizerId ?? ''}
+                      onChange={(e) => handleGoogleSttChange('recognizerId', e.target.value)}
+                      placeholder="my-recognizer"
+                      style={mergeStyles(baseInputStyle, validationErrors['googleCloudSTT.recognizerId'] ? errorInputStyle : undefined)}
+                    />
+                    {renderValidationMessage('googleCloudSTT.recognizerId')}
                   </div>
-                )}
+
+                  <div style={fieldBlockStyle}>
+                    <span style={labelStyle}>Service Account Key 路徑</span>
+                    <input
+                      type="text"
+                      value={googleSttSettings.keyFilePath ?? ''}
+                      onChange={(e) => handleGoogleSttChange('keyFilePath', e.target.value)}
+                      placeholder="/Users/xxx/credentials.json"
+                      style={mergeStyles(baseInputStyle, validationErrors['googleCloudSTT.keyFilePath'] ? errorInputStyle : undefined)}
+                    />
+                    {renderValidationMessage('googleCloudSTT.keyFilePath')}
+                    {googleSttSettings.keyFilePath === BUILTIN_GOOGLE_STT_KEY && (
+                      <span style={helperTextStyle}>將使用內建金鑰（resources/credentials/google-stt.json）</span>
+                    )}
+                  </div>
+
+                  <div style={fieldBlockStyle}>
+                    <span style={labelStyle}>語言代碼</span>
+                    <input
+                      type="text"
+                      value={googleSttSettings.languageCode ?? ''}
+                      onChange={(e) => handleGoogleSttChange('languageCode', e.target.value)}
+                      placeholder="例如：zh-TW"
+                      style={baseInputStyle}
+                    />
+                  </div>
+
+                  <div style={fieldBlockStyle}>
+                    <span style={labelStyle}>模型 ID</span>
+                    <input
+                      type="text"
+                      value={googleSttSettings.model ?? ''}
+                      onChange={(e) => handleGoogleSttChange('model', e.target.value)}
+                      placeholder="建議：latest_long"
+                      style={baseInputStyle}
+                    />
+                  </div>
+
+                  <div style={fieldBlockStyle}>
+                    <span style={labelStyle}>最少說話者數</span>
+                    <input
+                      type="number"
+                      min={1}
+                      value={googleSttSettings.minSpeakerCount ?? 1}
+                      onChange={(e) => handleGoogleSttChange('minSpeakerCount', Number(e.target.value) || 1)}
+                      style={baseInputStyle}
+                    />
+                  </div>
+
+                  <div style={fieldBlockStyle}>
+                    <span style={labelStyle}>最多說話者數</span>
+                    <input
+                      type="number"
+                      min={1}
+                      value={googleSttSettings.maxSpeakerCount ?? 6}
+                      onChange={(e) => handleGoogleSttChange('maxSpeakerCount', Number(e.target.value) || 6)}
+                      style={baseInputStyle}
+                    />
+                  </div>
+                </div>
+
+                <label style={{ display: 'flex', alignItems: 'center', gap: '8px', fontSize: '13px', color: '#374151' }}>
+                  <input
+                    type="checkbox"
+                    checked={googleSttSettings.enableSpeakerDiarization ?? true}
+                    onChange={(e) => handleGoogleSttChange('enableSpeakerDiarization', e.target.checked)}
+                  />
+                  啟用說話者分段 (Speaker Diarization)
+                </label>
               </div>
-            </div>
-          )}
+            )}
+          </div>
+
+          {renderDiagnosticResult()}
         </div>
 
-        {/* Gemini Advanced Settings */}
         {formData.useGemini && (
-          <div className="bg-white rounded-lg shadow-sm p-6">
-            <div className="flex items-center justify-between mb-4">
-              <h2 className="text-xl font-semibold text-gray-800">Gemini 進階設定</h2>
-              <button
-                onClick={() => setShowAdvancedGeminiSettings(!showAdvancedGeminiSettings)}
-                className="text-blue-500 hover:text-blue-700 text-sm font-medium"
-              >
-                {showAdvancedGeminiSettings ? '隱藏' : '顯示'} 進階選項
-              </button>
-            </div>
+          <div style={columnStyle}>
+            <div style={cardStyle}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                <h2 style={sectionTitleStyle}>Gemini 進階設定</h2>
+                <button
+                  type="button"
+                  onClick={() => setShowAdvancedGeminiSettings(!showAdvancedGeminiSettings)}
+                  style={{
+                    background: 'none',
+                    border: 'none',
+                    color: '#2563eb',
+                    fontWeight: 600,
+                    fontSize: '14px',
+                    cursor: 'pointer'
+                  }}
+                >
+                  {showAdvancedGeminiSettings ? '隱藏進階選項' : '顯示進階選項'}
+                </button>
+              </div>
 
-            {showAdvancedGeminiSettings && (
-              <div className="space-y-4">
-                {/* Preferred Model */}
-                <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-2">
-                    偏好模型
-                  </label>
-                  <select
-                    value={formData.geminiPreferredModel || 'gemini-2.5-pro'}
-                    onChange={(e) => handleInputChange('geminiPreferredModel', e.target.value)}
-                    className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
-                  >
-                    <option value="gemini-2.5-pro">Gemini 2.5 Pro (推薦)</option>
-                    <option value="gemini-2.5-flash">Gemini 2.5 Flash (備用)</option>
-                  </select>
-                </div>
+              {showAdvancedGeminiSettings && (
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
+                  <div style={fieldBlockStyle}>
+                    <span style={labelStyle}>偏好模型</span>
+                    <select
+                      value={formData.geminiPreferredModel || 'gemini-2.5-pro'}
+                      onChange={(e) => handleInputChange('geminiPreferredModel', e.target.value)}
+                      style={baseInputStyle}
+                    >
+                      <option value="gemini-2.5-pro">Gemini 2.5 Pro (推薦)</option>
+                      <option value="gemini-2.5-flash">Gemini 2.5 Flash (備用)</option>
+                    </select>
+                  </div>
 
-                {/* Enable Fallback */}
-                <div>
-                  <label className="flex items-center">
+                  <label style={{ display: 'flex', alignItems: 'center', gap: '8px', fontSize: '13px', color: '#374151' }}>
                     <input
                       type="checkbox"
                       checked={formData.geminiEnableFallback ?? true}
                       onChange={(e) => handleInputChange('geminiEnableFallback', e.target.checked)}
-                      className="w-4 h-4 text-blue-600 border-gray-300 rounded focus:ring-blue-500"
                     />
-                    <span className="ml-2 text-sm font-medium text-gray-700">
-                      啟用模型 Fallback
-                    </span>
+                    啟用模型 Fallback
                   </label>
-                  <p className="mt-1 text-xs text-gray-500">
-                    當主要模型不可用時自動嘗試其他模型
-                  </p>
-                </div>
+                  <span style={helperTextStyle}>當主要模型不可用時自動嘗試其他模型</span>
 
-                {/* Diagnostic Mode */}
-                <div>
-                  <label className="flex items-center">
+                  <label style={{ display: 'flex', alignItems: 'center', gap: '8px', fontSize: '13px', color: '#374151' }}>
                     <input
                       type="checkbox"
                       checked={formData.geminiDiagnosticMode ?? false}
                       onChange={(e) => handleInputChange('geminiDiagnosticMode', e.target.checked)}
-                      className="w-4 h-4 text-blue-600 border-gray-300 rounded focus:ring-blue-500"
                     />
-                    <span className="ml-2 text-sm font-medium text-gray-700">
-                      診斷模式
-                    </span>
+                    診斷模式
                   </label>
-                  <p className="mt-1 text-xs text-gray-500">
-                    啟用詳細的日誌記錄以便問題排查
-                  </p>
-                </div>
+                  <span style={helperTextStyle}>啟用詳細的日誌記錄以便問題排查</span>
 
-                {/* Health Check */}
-                <div>
-                  <label className="flex items-center">
+                  <label style={{ display: 'flex', alignItems: 'center', gap: '8px', fontSize: '13px', color: '#374151' }}>
                     <input
                       type="checkbox"
                       checked={formData.geminiHealthCheckEnabled ?? true}
                       onChange={(e) => handleInputChange('geminiHealthCheckEnabled', e.target.checked)}
-                      className="w-4 h-4 text-blue-600 border-gray-300 rounded focus:ring-blue-500"
                     />
-                    <span className="ml-2 text-sm font-medium text-gray-700">
-                      啟用 API 健康檢查
-                    </span>
+                    啟用 API 健康檢查
                   </label>
-                  <p className="mt-1 text-xs text-gray-500">
-                    在開始轉錄前檢查 API 是否可用
-                  </p>
-                </div>
 
-                {/* Retry Configuration */}
-                <div className="border-t pt-4">
-                  <h3 className="text-md font-medium text-gray-700 mb-3">重試配置</h3>
-
-                  <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-                    <div>
-                      <label className="block text-sm font-medium text-gray-700 mb-1">
-                        最大重試次數
-                      </label>
-                      <input
-                        type="number"
-                        min="1"
-                        max="10"
-                        value={formData.geminiRetryConfig?.maxRetries ?? 5}
-                        onChange={(e) => handleInputChange('geminiRetryConfig', {
-                          ...formData.geminiRetryConfig,
-                          maxRetries: parseInt(e.target.value)
-                        })}
-                        className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
-                      />
-                    </div>
-
-                    <div>
-                      <label className="block text-sm font-medium text-gray-700 mb-1">
-                        基礎延遲 (秒)
-                      </label>
-                      <input
-                        type="number"
-                        min="5"
-                        max="120"
-                        value={(formData.geminiRetryConfig?.baseDelay ?? 30000) / 1000}
-                        onChange={(e) => handleInputChange('geminiRetryConfig', {
-                          ...formData.geminiRetryConfig,
-                          baseDelay: parseInt(e.target.value) * 1000
-                        })}
-                        className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
-                      />
-                    </div>
-
-                    <div className="flex items-center">
-                      <label className="flex items-center">
+                  <div>
+                    <div style={{ fontWeight: 600, color: '#1f2937', marginBottom: '8px' }}>重試配置</div>
+                    <div style={twoColumnGridStyle}>
+                      <div style={fieldBlockStyle}>
+                        <span style={labelStyle}>最大重試次數</span>
                         <input
-                          type="checkbox"
-                          checked={formData.geminiRetryConfig?.enableJitter ?? true}
+                          type="number"
+                          min={1}
+                          max={10}
+                          value={formData.geminiRetryConfig?.maxRetries ?? 5}
                           onChange={(e) => handleInputChange('geminiRetryConfig', {
                             ...formData.geminiRetryConfig,
-                            enableJitter: e.target.checked
+                            maxRetries: parseInt(e.target.value, 10)
                           })}
-                          className="w-4 h-4 text-blue-600 border-gray-300 rounded focus:ring-blue-500"
+                          style={baseInputStyle}
                         />
-                        <span className="ml-2 text-sm font-medium text-gray-700">
-                          隨機抖動
-                        </span>
-                      </label>
-                    </div>
-                  </div>
+                      </div>
 
-                  <p className="mt-2 text-xs text-gray-500">
-                    配置 API 請求失敗時的重試行為
-                  </p>
+                      <div style={fieldBlockStyle}>
+                        <span style={labelStyle}>基礎延遲 (毫秒)</span>
+                        <input
+                          type="number"
+                          min={1000}
+                          step={1000}
+                          value={formData.geminiRetryConfig?.baseDelay ?? 30000}
+                          onChange={(e) => handleInputChange('geminiRetryConfig', {
+                            ...formData.geminiRetryConfig,
+                            baseDelay: parseInt(e.target.value, 10)
+                          })}
+                          style={baseInputStyle}
+                        />
+                      </div>
+                    </div>
+
+                    <label style={{ display: 'flex', alignItems: 'center', gap: '8px', fontSize: '13px', color: '#374151', marginTop: '8px' }}>
+                      <input
+                        type="checkbox"
+                        checked={formData.geminiRetryConfig?.enableJitter ?? true}
+                        onChange={(e) => handleInputChange('geminiRetryConfig', {
+                          ...formData.geminiRetryConfig,
+                          enableJitter: e.target.checked
+                        })}
+                      />
+                      隨機抖動
+                    </label>
+                    <span style={helperTextStyle}>配置請求失敗時的重試行為</span>
+                  </div>
                 </div>
-              </div>
-            )}
+              )}
+            </div>
           </div>
         )}
-
-        {/* Feature Flags */}
-        <div className="bg-white rounded-lg shadow-sm p-6">
-          <h2 className="text-xl font-semibold text-gray-800 mb-4">功能狀態</h2>
-          
-          {/* Enabled Features */}
-          {enabledFeatures.length > 0 && (
-            <div className="mb-6">
-              <h3 className="text-md font-medium text-gray-700 mb-3">已啟用功能</h3>
-              <div className="space-y-2">
-                {enabledFeatures.map(flag => (
-                  <div key={flag} className="flex items-center p-3 bg-green-50 border border-green-200 rounded">
-                    <div className="w-2 h-2 bg-green-500 rounded-full mr-3"></div>
-                    <div className="flex-1">
-                      <div className="text-sm font-medium text-green-800">{FEATURE_DESCRIPTIONS[flag]}</div>
-                    </div>
-                    <svg className="w-4 h-4 text-green-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
-                    </svg>
-                  </div>
-                ))}
-              </div>
-            </div>
-          )}
-
-          {/* Disabled Features */}
-          {disabledFeatures.length > 0 && (
-            <div>
-              <h3 className="text-md font-medium text-gray-700 mb-3">即將推出</h3>
-              <div className="space-y-2">
-                {disabledFeatures.map(flag => (
-                  <div key={flag} className="flex items-center p-3 bg-gray-50 border border-gray-200 rounded">
-                    <div className="w-2 h-2 bg-gray-400 rounded-full mr-3"></div>
-                    <div className="flex-1">
-                      <div className="text-sm text-gray-600">{FEATURE_DESCRIPTIONS[flag]}</div>
-                    </div>
-                    <svg className="w-4 h-4 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" />
-                    </svg>
-                  </div>
-                ))}
-              </div>
-            </div>
-          )}
-        </div>
       </div>
 
-      {/* Application Info */}
-      <div className="bg-white rounded-lg shadow-sm p-6">
-        <h2 className="text-xl font-semibold text-gray-800 mb-4">應用程式資訊</h2>
-        <div className="grid grid-cols-2 md:grid-cols-4 gap-4 text-sm">
-          <div>
-            <span className="text-gray-500">版本</span>
-            <div className="font-medium">1.0.0</div>
-          </div>
-          <div>
-            <span className="text-gray-500">平台</span>
-            <div className="font-medium">Windows</div>
-          </div>
-          <div>
-            <span className="text-gray-500">環境</span>
-            <div className="font-medium capitalize">{formData.environment}</div>
-          </div>
-          <div>
-            <span className="text-gray-500">模式</span>
-            <div className="font-medium">{formData.useMock ? 'Mock' : 'Production'}</div>
-          </div>
-        </div>
-      </div>
+      {renderFeatureList()}
+      {renderApplicationInfo()}
 
-      {/* Action Buttons */}
-      <div className="flex gap-4 justify-center">
+      <div style={actionRowStyle}>
         <button
+          type="button"
           onClick={handleSave}
           disabled={isSaving || !hasUnsavedChanges}
-          className="px-8 py-3 bg-blue-500 text-white font-semibold rounded-lg hover:bg-blue-600 disabled:bg-gray-400 disabled:cursor-not-allowed transition-colors"
+          style={{
+            ...buildFilledButtonStyle('blue', isSaving || !hasUnsavedChanges),
+            width: '220px'
+          }}
         >
-          {isSaving ? '保存中...' : '保存設定'}
+          {isSaving ? '保存中…' : '保存設定'}
         </button>
 
         <button
+          type="button"
           onClick={handleReset}
-          className="px-8 py-3 border border-gray-300 text-gray-700 font-semibold rounded-lg hover:bg-gray-50 transition-colors"
+          style={secondaryButtonStyle}
         >
           重置設定
         </button>
       </div>
 
-      {/* Help Text */}
-      <div className="bg-blue-50 border border-blue-200 rounded-lg p-4 text-sm text-blue-800">
-        <h3 className="font-medium mb-2">設定說明：</h3>
-        <ul className="space-y-1 list-disc list-inside">
-          <li><strong>Mock 模式</strong>：使用模擬資料進行測試，不會發送實際 API 請求</li>
-          <li><strong>環境切換</strong>：選擇不同的 API 環境（開發、測試、正式）</li>
-          <li><strong>API 金鑰</strong>：用於身份驗證的密鑰，請妥善保管</li>
-          <li><strong>功能狀態</strong>：顯示當前版本可用和即將推出的功能</li>
+      <div style={helpBoxStyle}>
+        <h3 style={{ margin: '0 0 12px', fontSize: '15px', fontWeight: 600 }}>設定說明：</h3>
+        <ul style={{ margin: 0, paddingLeft: '20px', fontSize: '13px', color: '#1d4ed8', lineHeight: 1.6 }}>
+          <li><strong>Gemini 模式</strong>：需填寫 API 金鑰，提供最完整的語音轉文字與摘要功能。</li>
+          <li><strong>Google STT + Gemini</strong>：提供更穩定的逐字稿品質，適合長會議或高精度需求。</li>
+          <li><strong>環境切換</strong>：可依部署情境選擇開發、測試或正式環境。</li>
+          <li><strong>功能狀態</strong>：顯示目前版本已啟用與即將上線的能力，方便排程測試。</li>
         </ul>
       </div>
     </div>

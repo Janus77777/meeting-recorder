@@ -97,3 +97,6 @@ dist_electron/
 
 # Auto-generated files
 *.auto.d.ts
+
+# Local credentials (ignored locally, copied into build)
+resources/credentials/google-stt.json

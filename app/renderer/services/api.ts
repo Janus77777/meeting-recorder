@@ -8,16 +8,11 @@ import {
   AppSettings
 } from '@shared/types';
 
-// Mock data import
-import mockMeeting from './mock/meeting.json';
-
 class APIClient {
   private settings: AppSettings;
-  private mockData: any;
 
   constructor(settings: AppSettings) {
     this.settings = settings;
-    this.mockData = mockMeeting;
   }
 
   updateSettings(settings: AppSettings): void {
@@ -25,15 +20,9 @@ class APIClient {
   }
 
   private async makeRequest<T>(
-    endpoint: string, 
+    endpoint: string,
     options: RequestInit = {}
   ): Promise<T> {
-    // Handle mock mode
-    if (this.settings.useMock) {
-      return this.handleMockRequest<T>(endpoint, options);
-    }
-
-    // Real API request
     const url = `${this.settings.baseURL}${endpoint}`;
     const headers = {
       'Content-Type': 'application/json',
@@ -51,45 +40,6 @@ class APIClient {
     }
 
     return response.json();
-  }
-
-  private async handleMockRequest<T>(endpoint: string, options: RequestInit): Promise<T> {
-    // Simulate network delay
-    await new Promise(resolve => setTimeout(resolve, 500 + Math.random() * 1000));
-
-    const method = options.method || 'GET';
-    
-    // Mock responses based on endpoint and method
-    if (method === 'POST' && endpoint === '/api/meetings') {
-      return {
-        id: this.mockData.meeting.id,
-        createdAt: new Date().toISOString()
-      } as T;
-    }
-
-    if (method === 'POST' && endpoint.includes('/audio')) {
-      return { ok: true } as T;
-    }
-
-    if (method === 'POST' && endpoint.includes('/complete')) {
-      return { status: 'queued' } as T;
-    }
-
-    if (method === 'GET' && endpoint.includes('/status')) {
-      // Simulate status progression
-      const statuses = ['queued', 'stt', 'summarize', 'done'];
-      const randomStatus = statuses[Math.floor(Math.random() * statuses.length)];
-      return { 
-        status: randomStatus,
-        progress: randomStatus === 'done' ? 100 : Math.floor(Math.random() * 80) + 20
-      } as T;
-    }
-
-    if (method === 'GET' && endpoint.includes('/result')) {
-      return this.mockData as T;
-    }
-
-    throw new Error(`Mock endpoint not implemented: ${method} ${endpoint}`);
   }
 
   // API Methods

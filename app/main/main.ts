@@ -3,6 +3,7 @@ import * as path from 'path';
 import { autoUpdater } from 'electron-updater';
 import { setupRecordingIPC } from './ipc/recording';
 import { setupSystemAudioIPC } from './ipc/system-audio';
+import { setupSTTIPC } from './ipc/sttHandlers';
 
 class MeetingRecorderApp {
   private mainWindow: BrowserWindow | null = null;
@@ -127,10 +128,13 @@ class MeetingRecorderApp {
   private setupIPC(): void {
     // Setup recording IPC handlers
     setupRecordingIPC();
-    
+
     // Setup system audio IPC handlers (placeholder for future)
     setupSystemAudioIPC();
-    
+
+    // Setup Google STT handlers
+    setupSTTIPC();
+
     // Setup auto-updater IPC handlers
     this.setupUpdaterIPC();
 

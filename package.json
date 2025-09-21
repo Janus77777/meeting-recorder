@@ -1,6 +1,6 @@
 {
   "name": "meeting-transcription-tool",
-  "version": "1.1.4",
+  "version": "1.1.5",
   "description": "",
   "main": "dist/main/main.js",
   "scripts": {
@@ -44,8 +44,11 @@
     "webpack-node-externals": "^3.0.0"
   },
   "dependencies": {
+    "@google-cloud/speech": "^7.2.0",
+    "@types/fluent-ffmpeg": "^2.1.27",
     "@youngerheart/electron-recorder": "^0.0.0-beta.14",
     "electron-updater": "^6.6.2",
+    "fluent-ffmpeg": "^2.1.3",
     "process": "^0.11.10",
     "react": "^19.1.1",
     "react-dom": "^19.1.1",
@@ -67,6 +70,13 @@
       {
         "from": "assets",
         "to": "assets",
+        "filter": [
+          "**/*"
+        ]
+      },
+      {
+        "from": "resources/credentials/google-stt.json",
+        "to": "credentials/google-stt.json",
         "filter": [
           "**/*"
         ]

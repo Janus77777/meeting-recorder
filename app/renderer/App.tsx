@@ -2,9 +2,10 @@ import React, { useState } from 'react';
 import { SimpleNavigation } from './components/SimpleNavigation';
 import { initializeAPI, getAPI, updateAPISettings } from './services/api';
 import { GeminiAPIClient } from './services/geminiApi';
-import { AppSettings } from '@shared/types';
+import { AppSettings, STTTranscriptionResponse, STTTranscriptSegment, TranscriptSegment } from '@shared/types';
 import { useSettingsStore, useUIStore, useJobsStore, initializeStores } from './services/store';
 import PromptsPage from './pages/PromptsPage';
+import { SettingsPage } from './pages/SettingsPage';
 import { VocabularyService } from './services/vocabularyService';
 import { mergeMediaStreams, requestMicrophoneStream, requestSystemAudioStream, stopStream } from './utils/audioCapture';
 import { joinPath, normalizePath } from './utils/path';
@@ -54,6 +55,7 @@ const App: React.FC = () => {
   const [updateDownloaded, setUpdateDownloaded] = useState(false);
   const [appVersion, setAppVersion] = useState<string>('');
   const [platform, setPlatform] = useState<NodeJS.Platform | 'unknown'>('unknown');
+  const [updateStatusMessage, setUpdateStatusMessage] = useState<string>('尚未檢查更新');
 
   type AudioSegment = {
     index: number;
@@ -63,37 +65,86 @@ const App: React.FC = () => {
     duration: number;
   };
 
-  const MAX_SEGMENT_DURATION_SECONDS = 360; // 6 分鐘
-  const MIN_SEGMENT_DURATION_SECONDS = 90;  // 1.5 分鐘，避免最後一段過短
+  const DEFAULT_SEGMENT_MAX_DURATION_SECONDS = 360; // 6 分鐘（Gemini 直接模式）
+  const DEFAULT_SEGMENT_MIN_DURATION_SECONDS = 90;  // 避免最後一段過短
+  const STT_SEGMENT_MAX_DURATION_SECONDS = 50;      // Google STT 限制建議：單段小於 1 分鐘
+  const STT_SEGMENT_MIN_DURATION_SECONDS = 10;      // 保持結果可用性，避免過短片段
+  const STT_SEGMENT_MAX_BYTES = 7 * 1024 * 1024;    // STT 段落最大大小（7MB 原始資料）
+  const STT_BASE64_EXPANSION_FACTOR = 4 / 3;        // base64 放大係數
+
+  interface SegmentOptions {
+    maxDurationSeconds?: number;
+    minDurationSeconds?: number;
+    maxSegmentBytes?: number;
+  }
+
+  const normalizeMimeType = (mime?: string): string | undefined => {
+    if (!mime) {
+      return undefined;
+    }
+    return mime.split(';')[0]?.trim().toLowerCase();
+  };
+
+  const inferExtensionFromMime = (mime?: string): string => {
+    const normalized = normalizeMimeType(mime);
+    switch (normalized) {
+      case 'audio/mpeg':
+      case 'audio/mp3':
+        return 'mp3';
+      case 'audio/mp4':
+      case 'audio/x-m4a':
+      case 'audio/m4a':
+        return 'm4a';
+      case 'audio/aac':
+        return 'aac';
+      case 'audio/ogg':
+        return 'ogg';
+      case 'audio/opus':
+        return 'opus';
+      case 'audio/wav':
+      case 'audio/x-wav':
+      case 'audio/wave':
+      case 'audio/vnd.wave':
+        return 'wav';
+      case 'audio/flac':
+        return 'flac';
+      case 'audio/webm':
+      case 'audio/webm;codecs=opus':
+      default:
+        return 'webm';
+    }
+  };
 
   const createAudioSegments = (
     fullBlob: Blob,
     chunkList: Blob[] = [],
-    totalDuration: number = recordingTime
+    totalDuration: number = recordingTime,
+    options: SegmentOptions = {}
   ): AudioSegment[] => {
-    if (!chunkList || chunkList.length === 0 || !Number.isFinite(totalDuration) || totalDuration <= 0) {
-      return [{ index: 0, blob: fullBlob, start: 0, end: totalDuration > 0 ? totalDuration : 0, duration: totalDuration > 0 ? totalDuration : 0 }];
-    }
+    const maxBytes = options.maxSegmentBytes ?? Number.POSITIVE_INFINITY;
 
-    const chunkCount = chunkList.length;
-    const approxChunkDuration = totalDuration / chunkCount || 1;
-    const maxChunksPerSegment = Math.max(1, Math.round(MAX_SEGMENT_DURATION_SECONDS / approxChunkDuration));
+    const chunkCount = chunkList?.length ?? 0;
+    const hasChunks = chunkCount > 0;
+
+    const validDuration = Number.isFinite(totalDuration) && totalDuration > 0
+      ? totalDuration
+      : undefined;
+
+    const approxChunkDuration = hasChunks && validDuration
+      ? validDuration / chunkCount
+      : undefined;
+
+    const maxDuration = options.maxDurationSeconds ?? DEFAULT_SEGMENT_MAX_DURATION_SECONDS;
+    const minDuration = options.minDurationSeconds ?? DEFAULT_SEGMENT_MIN_DURATION_SECONDS;
+
+    const maxChunksPerSegment = approxChunkDuration
+      ? Math.max(1, Math.floor(maxDuration / approxChunkDuration))
+      : undefined;
 
     const segments: AudioSegment[] = [];
-    let currentChunks: Blob[] = [];
-    let segmentStartIndex = 0;
 
-    const pushSegment = (endIndexExclusive: number) => {
-      if (currentChunks.length === 0) {
-        return;
-      }
-
-      const startTime = segmentStartIndex * approxChunkDuration;
-      const chunkSpan = currentChunks.length * approxChunkDuration;
-      const endTime = Math.min(totalDuration, startTime + chunkSpan);
-      const duration = Math.max(endTime - startTime, approxChunkDuration);
-
-      const segmentBlob = new Blob(currentChunks, { type: fullBlob.type || 'audio/webm' });
+    const pushSegment = (segmentBlob: Blob, index: number, startTime: number, endTime: number) => {
+      const duration = Math.max(endTime - startTime, approxChunkDuration ?? (validDuration ?? 0));
       segments.push({
         index: segments.length,
         blob: segmentBlob,
@@ -101,6 +152,99 @@ const App: React.FC = () => {
         end: endTime,
         duration
       });
+    };
+
+    const shouldSplitBySize = (blob: Blob): boolean => {
+      if (!Number.isFinite(maxBytes)) {
+        return false;
+      }
+      if (blob.size <= maxBytes) {
+        return false;
+      }
+      return blob.size * STT_BASE64_EXPANSION_FACTOR > 10 * 1024 * 1024;
+    };
+
+    if (!hasChunks) {
+      if (!validDuration) {
+        pushSegment(fullBlob, 0, 0, 0);
+        return segments;
+      }
+
+      const targetBytes = Number.isFinite(maxBytes) && maxBytes > 0 ? maxBytes : fullBlob.size;
+      const segmentCountBySize = Math.max(1, Math.ceil(fullBlob.size / targetBytes));
+      const segmentCountByDuration = Math.max(1, Math.ceil(validDuration / maxDuration));
+      const segmentCount = Math.max(segmentCountBySize, segmentCountByDuration);
+
+      if (segmentCount === 1) {
+        pushSegment(fullBlob, 0, 0, validDuration);
+        return segments;
+      }
+
+      const bytesPerSegment = Math.ceil(fullBlob.size / segmentCount);
+
+      let byteStart = 0;
+      for (let segmentIndex = 0; segmentIndex < segmentCount; segmentIndex++) {
+        const byteEnd = segmentIndex === segmentCount - 1
+          ? fullBlob.size
+          : Math.min(fullBlob.size, byteStart + bytesPerSegment);
+
+        const startTime = (validDuration * byteStart) / (fullBlob.size || 1);
+        const endTime = segmentIndex === segmentCount - 1
+          ? validDuration
+          : (validDuration * byteEnd) / (fullBlob.size || 1);
+
+        const segmentBlob = fullBlob.slice(byteStart, byteEnd, fullBlob.type || 'audio/webm');
+        pushSegment(segmentBlob, segmentIndex, startTime, endTime);
+
+        byteStart = byteEnd;
+      }
+
+      return segments;
+    }
+
+    let currentChunks: Blob[] = [];
+    let segmentStartIndex = 0;
+
+    const finalizeSegment = (endIndexExclusive: number) => {
+      if (currentChunks.length === 0) {
+        return;
+      }
+
+      const startTime = approxChunkDuration ? segmentStartIndex * approxChunkDuration : (validDuration ?? 0);
+      const chunkSpan = approxChunkDuration ? currentChunks.length * approxChunkDuration : (validDuration ?? 0);
+      const endTime = validDuration ? Math.min(validDuration, startTime + chunkSpan) : startTime + chunkSpan;
+
+      let segmentBlob = new Blob(currentChunks, { type: fullBlob.type || 'audio/webm' });
+      const bytesPerChunk = chunkCount > 0 ? fullBlob.size / chunkCount : fullBlob.size;
+      let segmentByteStart = segmentStartIndex * bytesPerChunk;
+
+      if (shouldSplitBySize(segmentBlob)) {
+        const splits = Math.ceil(segmentBlob.size / (maxBytes || segmentBlob.size));
+        const bytesPerSplit = Math.ceil(segmentBlob.size / splits);
+
+        for (let splitIndex = 0; splitIndex < splits; splitIndex++) {
+          const splitByteStart = segmentByteStart + splitIndex * bytesPerSplit;
+          const splitByteEnd = splitIndex === splits - 1
+            ? segmentByteStart + segmentBlob.size
+            : splitByteStart + bytesPerSplit;
+
+          const splitStartTime = validDuration
+            ? (validDuration * splitByteStart) / (fullBlob.size || 1)
+            : startTime;
+          const splitEndTime = validDuration
+            ? (validDuration * splitByteEnd) / (fullBlob.size || 1)
+            : endTime;
+
+          const splitBlob = segmentBlob.slice(
+            splitIndex * bytesPerSplit,
+            splitIndex === splits - 1 ? segmentBlob.size : (splitIndex + 1) * bytesPerSplit,
+            fullBlob.type || 'audio/webm'
+          );
+          pushSegment(splitBlob, segments.length, splitStartTime, splitEndTime);
+        }
+      } else {
+        pushSegment(segmentBlob, segments.length, startTime, endTime);
+      }
 
       currentChunks = [];
       segmentStartIndex = endIndexExclusive;
@@ -110,18 +254,26 @@ const App: React.FC = () => {
       currentChunks.push(chunk);
       const isLastChunk = idx === chunkCount - 1;
 
-      if (currentChunks.length >= maxChunksPerSegment || isLastChunk) {
-        pushSegment(idx + 1);
+      let reachedDurationLimit = false;
+      if (maxChunksPerSegment && approxChunkDuration) {
+        reachedDurationLimit = currentChunks.length >= maxChunksPerSegment;
+      }
+
+      const tempSegment = new Blob(currentChunks, { type: fullBlob.type || 'audio/webm' });
+      const reachedSizeLimit = shouldSplitBySize(tempSegment);
+
+      if (reachedDurationLimit || reachedSizeLimit || isLastChunk) {
+        finalizeSegment(idx + 1);
       }
     });
 
     if (segments.length === 0) {
-      return [{ index: 0, blob: fullBlob, start: 0, end: totalDuration, duration: totalDuration }];
+      finalizeSegment(chunkCount);
     }
 
-    if (segments.length > 1) {
+    if (segments.length > 1 && approxChunkDuration) {
       const lastSegment = segments[segments.length - 1];
-      if (lastSegment.duration < MIN_SEGMENT_DURATION_SECONDS) {
+      if (lastSegment.duration < minDuration) {
         const prev = segments[segments.length - 2];
         const mergedBlob = new Blob([prev.blob, lastSegment.blob], { type: fullBlob.type || 'audio/webm' });
         const mergedSegment: AudioSegment = {
@@ -136,6 +288,113 @@ const App: React.FC = () => {
     }
 
     return segments.map((segment, idx) => ({ ...segment, index: idx }));
+  };
+
+  const createSTTAudioSegments = (
+    fullBlob: Blob,
+    chunkList: Blob[] = [],
+    totalDuration: number = recordingTime
+  ): AudioSegment[] => {
+    return createAudioSegments(fullBlob, chunkList, totalDuration, {
+      maxDurationSeconds: STT_SEGMENT_MAX_DURATION_SECONDS,
+      minDurationSeconds: STT_SEGMENT_MIN_DURATION_SECONDS,
+      maxSegmentBytes: STT_SEGMENT_MAX_BYTES
+    });
+  };
+
+  const formatSecondsToTimestamp = (seconds?: number): string => {
+    if (seconds === undefined || seconds === null || Number.isNaN(seconds)) {
+      return '00:00';
+    }
+    const totalSeconds = Math.max(0, Math.floor(seconds));
+    const hours = Math.floor(totalSeconds / 3600);
+    const minutes = Math.floor((totalSeconds % 3600) / 60);
+    const secs = totalSeconds % 60;
+    if (hours > 0) {
+      return `${hours.toString().padStart(2, '0')}:${minutes.toString().padStart(2, '0')}:${secs
+        .toString()
+        .padStart(2, '0')}`;
+    }
+    return `${minutes.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
+  };
+
+  const buildTranscriptFromSTTSegments = (segments: STTTranscriptSegment[] = []): {
+    formattedSegments: TranscriptSegment[];
+    text: string;
+  } => {
+    if (!segments.length) {
+      return { formattedSegments: [], text: '' };
+    }
+
+    const maxGapSeconds = 2;
+    const sorted = [...segments].sort((a, b) => {
+      const aStart = a.startTime ?? 0;
+      const bStart = b.startTime ?? 0;
+      return aStart - bStart;
+    });
+
+    type WorkingSegment = {
+      speakerTag: number | undefined;
+      startTime: number;
+      endTime: number;
+      words: string[];
+    };
+
+    const combined: WorkingSegment[] = [];
+
+    for (const word of sorted) {
+      const start = word.startTime ?? word.endTime ?? 0;
+      const end = word.endTime ?? word.startTime ?? start;
+      const speakerTag = word.speakerTag;
+
+      const last = combined[combined.length - 1];
+      const gap = last ? start - last.endTime : Number.POSITIVE_INFINITY;
+
+      if (
+        !last ||
+        last.speakerTag !== speakerTag ||
+        gap > maxGapSeconds
+      ) {
+        combined.push({
+          speakerTag,
+          startTime: start,
+          endTime: end,
+          words: [word.text ?? '']
+        });
+      } else {
+        last.words.push(word.text ?? '');
+        last.endTime = end;
+      }
+    }
+
+    const formattedSegments: TranscriptSegment[] = combined.map(seg => {
+      const speakerLabel = seg.speakerTag ? `Speaker ${seg.speakerTag}` : 'Speaker';
+      return {
+        start: formatSecondsToTimestamp(seg.startTime),
+        end: formatSecondsToTimestamp(seg.endTime),
+        speaker: speakerLabel,
+        text: seg.words.join(' ').replace(/\s+/g, ' ').trim()
+      };
+    });
+
+    const text = formattedSegments
+      .map(seg => {
+        const range = `${seg.start} - ${seg.end}`;
+        return `[${seg.speaker} ${range}]: ${seg.text}`;
+      })
+      .join('\n');
+
+    return { formattedSegments, text };
+  };
+
+  const getGeminiKey = (config: AppSettings): string | undefined => {
+    if (config.geminiApiKey && config.geminiApiKey.trim()) {
+      return config.geminiApiKey;
+    }
+    if (config.apiKey && config.apiKey.trim()) {
+      return config.apiKey;
+    }
+    return undefined;
   };
 
   const getBlobDuration = (blob: Blob): Promise<number> => {
@@ -178,7 +437,7 @@ const App: React.FC = () => {
       setIsSettingsHydrated(true);
       initializeAPI(settings);
       updateAPISettings(settings);
-      console.log('應用初始化完成，Gemini API Key:', settings.geminiApiKey ? '已設定' : '未設定');
+      console.log('應用初始化完成，Gemini API Key:', getGeminiKey(settings) ? '已設定' : '未設定');
     } else {
       // 如果還沒恢復，等待一下再檢查
       const timer = setTimeout(() => {
@@ -187,7 +446,7 @@ const App: React.FC = () => {
         setIsSettingsHydrated(true);
         initializeAPI(currentSettings);
         updateAPISettings(currentSettings);
-        console.log('延遲初始化完成，Gemini API Key:', currentSettings.geminiApiKey ? '已設定' : '未設定');
+        console.log('延遲初始化完成，Gemini API Key:', getGeminiKey(currentSettings) ? '已設定' : '未設定');
       }, 100);
       
       return () => clearTimeout(timer);
@@ -236,6 +495,8 @@ const App: React.FC = () => {
         setUpdateAvailable(true);
         setUpdateDownloaded(false);
         setUpdateInfo(info);
+        setUpdateStatusMessage(`發現新版本 ${info.version}`);
+        setUpdateProgress(null);
       });
 
       api.updater.onUpdateProgress((progress) => {
@@ -244,22 +505,93 @@ const App: React.FC = () => {
           percent: progress.percent,
           status: `下載中... ${progress.percent.toFixed(1)}%`
         });
+        setUpdateStatusMessage(`下載中... ${progress.percent.toFixed(1)}%`);
       });
 
       api.updater.onUpdateDownloaded((info) => {
         console.log('更新下載完成 (renderer):', info.version);
         setUpdateDownloaded(true);
         setUpdateProgress({ percent: 100, status: '下載完成，等待安裝' });
+        setUpdateStatusMessage(`更新 v${info.version} 已下載，請點擊安裝`);
       });
+    } else {
+      setUpdateStatusMessage('目前環境不支援自動更新');
     }
 
-    api?.app.getVersion()
+  api?.app.getVersion()
       .then((version) => setAppVersion(version))
       .catch((error) => {
         console.warn('取得應用版本失敗:', error);
         setAppVersion('');
       });
   }, []);
+
+
+  const handleCheckUpdates = async () => {
+    const updater = window.electronAPI?.updater;
+    if (!updater) {
+      setUpdateStatusMessage('目前環境不支援自動更新');
+      return;
+    }
+
+    try {
+      setUpdateStatusMessage('檢查更新中...');
+      setUpdateProgress(null);
+      const result = await updater.checkForUpdates();
+
+      if (result?.available) {
+        setUpdateAvailable(true);
+        setUpdateDownloaded(false);
+        setUpdateInfo({ version: result.version ?? '' });
+        setUpdateStatusMessage(`發現新版本 ${result.version ?? ''}`.trim());
+      } else {
+        setUpdateAvailable(false);
+        setUpdateDownloaded(false);
+        setUpdateInfo(null);
+        const message = result?.message || '目前已是最新版本';
+        setUpdateStatusMessage(message);
+      }
+    } catch (error) {
+      setUpdateStatusMessage(`檢查更新失敗：${(error as Error).message}`);
+    }
+  };
+
+  const handleDownloadUpdate = async () => {
+    const updater = window.electronAPI?.updater;
+    if (!updater) {
+      setUpdateStatusMessage('目前環境不支援自動更新');
+      return;
+    }
+
+    try {
+      setUpdateStatusMessage('準備下載更新...');
+      setUpdateProgress({ percent: 0, status: '準備下載更新...' });
+      const result = await updater.downloadUpdate();
+      if (!result?.success) {
+        const message = result?.error ? `下載更新失敗：${result.error}` : '下載更新失敗';
+        setUpdateStatusMessage(message);
+        setUpdateProgress(null);
+      }
+    } catch (error) {
+      setUpdateStatusMessage(`下載更新失敗：${(error as Error).message}`);
+      setUpdateProgress(null);
+    }
+  };
+
+  const handleInstallUpdate = async () => {
+    const updater = window.electronAPI?.updater;
+    if (!updater) {
+      setUpdateStatusMessage('目前環境不支援自動更新');
+      return;
+    }
+
+    try {
+      setUpdateStatusMessage('應用程式即將重新啟動以安裝更新...');
+      await updater.installUpdate();
+    } catch (error) {
+      setUpdateStatusMessage(`安裝更新失敗：${(error as Error).message}`);
+    }
+  };
 
 
   const formatTime = (seconds: number) => {
@@ -625,16 +957,17 @@ const App: React.FC = () => {
       
       addJob(newJob);
       
-      // 檢查是否使用 Gemini API
-      if (settings.useGemini && settings.geminiApiKey) {
+      const mode = settings.transcriptionMode || (settings.useGemini ? 'gemini_direct' : 'hybrid_stt');
+
+      if (mode === 'hybrid_stt') {
+        console.log('使用 Google STT + Gemini 混合模式進行轉錄');
+        await startHybridSTTTranscription(audioBlob, filename, jobId, originalChunks, durationSeconds);
+      } else if (settings.useGemini && settings.geminiApiKey) {
         console.log('使用 Google Gemini API 進行轉錄');
         await startGeminiTranscription(audioBlob, filename, jobId, originalChunks, durationSeconds);
-      } else if (!settings.useMock) {
+      } else {
         console.log('使用原有 API 進行轉錄');
         await startOriginalApiTranscription(audioBlob, filename, jobId, originalChunks, durationSeconds);
-      } else {
-        console.log('使用 Mock API 進行轉錄');
-        await startMockTranscription(jobId);
       }
       
     } catch (error) {
@@ -650,6 +983,220 @@ const App: React.FC = () => {
     }
   };
 
+  const startHybridSTTTranscription = async (
+    audioBlob: Blob,
+    filename: string,
+    jobId: string,
+    originalChunks: Blob[] = [],
+    durationSeconds: number = recordingTime
+  ) => {
+    const currentSettings = useSettingsStore.getState().settings;
+    const sttSettings = currentSettings.googleCloudSTT;
+    let cleanupPaths: string[] = [];
+
+    try {
+      if (!sttSettings || !sttSettings.enabled) {
+        throw new Error('請先在設定頁啟用並配置 Google STT');
+      }
+
+      const missingFields: string[] = [];
+      if (!sttSettings.projectId) missingFields.push('Project ID');
+      if (!sttSettings.location) missingFields.push('Location');
+      if (!sttSettings.recognizerId) missingFields.push('Recognizer ID');
+      if (!sttSettings.keyFilePath) missingFields.push('Service Account Key 檔案');
+      if (missingFields.length > 0) {
+        throw new Error(`Google STT 設定不完整：${missingFields.join('、')}`);
+      }
+
+      const geminiKey = getGeminiKey(currentSettings);
+      if (!geminiKey) {
+        throw new Error('請先設定 API 金鑰，以便進行後續摘要與後處理');
+      }
+
+      setRecordingStatus('初始化 Google STT 服務...');
+      const initResult = await window.electronAPI.stt.initialize({
+        projectId: sttSettings.projectId!,
+        location: sttSettings.location!,
+        recognizerId: sttSettings.recognizerId!,
+        keyFilePath: sttSettings.keyFilePath!,
+        model: sttSettings.model
+      });
+
+      if (!initResult.success) {
+        throw new Error(initResult.error || 'Google STT 初始化失敗');
+      }
+
+      const tempDirResult = await window.electronAPI.recording.getTempDir();
+      if (!tempDirResult.success || !tempDirResult.tempDir) {
+        throw new Error(tempDirResult.error || '無法取得暫存目錄');
+      }
+      const tempDir = tempDirResult.tempDir;
+
+      cleanupPaths = [];
+      const baseMime = normalizeMimeType(audioBlob.type) || 'audio/webm';
+      const baseExt = inferExtensionFromMime(baseMime);
+      const sourceFilePath = joinPath(tempDir, `${jobId}-source.${baseExt}`);
+
+      setRecordingStatus('保存原始音訊檔案...');
+      const originalBuffer = await audioBlob.arrayBuffer();
+      const saveOriginalResult = await window.electronAPI.recording.saveBlob(sourceFilePath, originalBuffer);
+      if (!saveOriginalResult.success) {
+        throw new Error(saveOriginalResult.error || '原始音訊儲存失敗');
+      }
+      cleanupPaths.push(sourceFilePath);
+
+      setRecordingStatus('轉換音訊格式，準備切割...');
+      const prepareResult = await window.electronAPI.stt.prepareAudio({
+        sourcePath: sourceFilePath,
+        mimeType: baseMime,
+        sampleRate: 16_000
+      });
+      if (!prepareResult.success || !prepareResult.wavPath) {
+        throw new Error(prepareResult.error || '音訊格式轉換失敗');
+      }
+
+      const preparedWavPath = prepareResult.wavPath;
+      cleanupPaths.push(preparedWavPath);
+
+      const sttSegments = createSTTAudioSegments(audioBlob, originalChunks, prepareResult.durationSeconds ?? durationSeconds);
+      console.log('📼 Google STT 分段資訊:', sttSegments.map(s => ({ index: s.index + 1, duration: s.duration })));
+
+      const aggregatedSegments: STTTranscriptSegment[] = [];
+      const transcriptParts: string[] = [];
+
+      let enableSpeakerDiarization = sttSettings.enableSpeakerDiarization ?? true;
+      const recognizerIdLower = (sttSettings.recognizerId || '').toLowerCase();
+      const modelIdLower = (sttSettings.model || '').toLowerCase();
+      const isChirpRecognizer = recognizerIdLower.includes('chirp') || modelIdLower.includes('chirp');
+      if (enableSpeakerDiarization && isChirpRecognizer) {
+        enableSpeakerDiarization = false;
+        console.warn('選用的 Google STT 模型 (Chirp) 不支援說話者分段，已自動停用該功能。');
+        setRecordingStatus('目前選用的 Google STT 模型不支援說話者分段，已自動停用該功能。');
+      }
+
+      window.electronAPI.stt.onProgress(event => {
+        if (event.message) {
+          setRecordingStatus(event.message);
+        }
+        if (typeof event.progress === 'number') {
+          updateJob(jobId, { progress: Math.min(90, Math.max(event.progress, 5)) });
+        }
+      });
+
+      updateJob(jobId, { status: 'stt', progress: 10 });
+      setRecordingStatus(`開始進行 Google STT 轉錄，共 ${sttSegments.length} 段`);
+
+      for (const segment of sttSegments) {
+        const partLabel = sttSegments.length > 1
+          ? `第 ${segment.index + 1}/${sttSegments.length} 段（約 ${Math.round(segment.start)}s ~ ${Math.round(segment.end)}s）`
+          : '整段音訊';
+
+        setRecordingStatus(`Google STT 正在處理 ${partLabel}...`);
+
+        const sttResponse: STTTranscriptionResponse = await window.electronAPI.stt.transcribe({
+          sourcePath: preparedWavPath,
+          startTimeSeconds: segment.start,
+          endTimeSeconds: segment.end,
+          languageCode: sttSettings.languageCode || 'zh-TW',
+          enableWordTimeOffsets: false,
+          enableSpeakerDiarization: false,
+          minSpeakerCount: enableSpeakerDiarization ? (sttSettings.minSpeakerCount ?? 1) : undefined,
+          maxSpeakerCount: enableSpeakerDiarization ? (sttSettings.maxSpeakerCount ?? 6) : undefined,
+          mimeType: 'audio/wav'
+        });
+
+        if (!sttResponse.success || !sttResponse.transcript) {
+          throw new Error(sttResponse.error || 'Google STT 轉錄失敗');
+        }
+
+        if (Array.isArray(sttResponse.segments)) {
+          aggregatedSegments.push(...sttResponse.segments);
+        }
+
+        transcriptParts.push(sttResponse.transcript);
+
+        const segmentProgress = 10 + Math.floor(((segment.index + 1) / sttSegments.length) * 60);
+        updateJob(jobId, { progress: segmentProgress });
+      }
+
+      let formattedSegments: TranscriptSegment[] = [];
+      let transcriptFromSegments = '';
+
+      if (aggregatedSegments.length > 0) {
+        const built = buildTranscriptFromSTTSegments(aggregatedSegments);
+        formattedSegments = built.formattedSegments;
+        transcriptFromSegments = built.text;
+      }
+
+      let finalTranscript = transcriptParts.join('\n\n').trim();
+
+      if (!finalTranscript) {
+        finalTranscript = transcriptFromSegments;
+      }
+
+      if ((!formattedSegments || formattedSegments.length === 0) && finalTranscript) {
+        formattedSegments = sttSegments.map((segment, idx) => ({
+          start: formatSecondsToTimestamp(segment.start),
+          end: formatSecondsToTimestamp(segment.end),
+          speaker: `Segment ${idx + 1}`,
+          text: (transcriptParts[idx] || finalTranscript)
+            .replace(/\s+/g, ' ')
+            .trim()
+        }));
+      }
+
+      if (!finalTranscript) {
+        throw new Error('無法取得 Google STT 轉錄結果');
+      }
+
+      if (settings.vocabularyList && settings.vocabularyList.length > 0) {
+        finalTranscript = VocabularyService.applyVocabularyCorrections(finalTranscript, settings.vocabularyList);
+      }
+
+      setRecordingStatus('Google STT 完成，準備生成會議摘要...');
+      updateJob(jobId, { progress: 80, status: 'summarize' });
+
+      const geminiClient = new GeminiAPIClient(geminiKey, {
+        preferredModel: currentSettings.geminiPreferredModel,
+        enableFallback: currentSettings.geminiEnableFallback,
+        retryConfig: currentSettings.geminiRetryConfig,
+        diagnosticMode: currentSettings.geminiDiagnosticMode
+      });
+
+      let summaryMarkdown = '';
+      let overallSummary = '';
+
+      if (settings.customSummaryPrompt) {
+        const summaryText = await geminiClient.generateCustomSummary(finalTranscript, settings.customSummaryPrompt);
+        summaryMarkdown = summaryText;
+        overallSummary = summaryText;
+      } else {
+        const structuredSummary = await geminiClient.generateStructuredSummaryFromTranscript(finalTranscript);
+        summaryMarkdown = structuredSummary.minutesMd;
+        overallSummary = structuredSummary.overallSummary;
+      }
+
+      updateJob(jobId, {
+        status: 'done',
+        progress: 100,
+        transcript: finalTranscript,
+        transcriptSegments: formattedSegments,
+        summary: summaryMarkdown
+      });
+
+      setRecordingStatus('Google STT 轉錄完成！可到「任務」或「結果」頁面查看');
+
+    } catch (error) {
+      console.error('Google STT 轉錄失敗:', error);
+      updateJob(jobId, { status: 'failed' });
+      setRecordingStatus('Google STT 轉錄失敗：' + (error instanceof Error ? error.message : String(error)));
+    } finally {
+      if (cleanupPaths.length > 0) {
+        window.electronAPI.recording.cleanup(cleanupPaths).catch(() => void 0);
+      }
+    }
+  };
+
   // 使用 Gemini API 進行轉錄
   const startGeminiTranscription = async (
     audioBlob: Blob,
@@ -661,17 +1208,18 @@ const App: React.FC = () => {
     try {
       // 直接使用最新的設定，不等待 hydration 狀態
       const currentSettings = useSettingsStore.getState().settings;
+      const geminiKey = getGeminiKey(currentSettings);
       console.log('🔍 開始 Gemini 轉錄，當前設定:', {
-        hasApiKey: !!currentSettings.geminiApiKey,
+        hasApiKey: !!geminiKey,
         useGemini: currentSettings.useGemini,
-        apiKeyPrefix: currentSettings.geminiApiKey?.substring(0, 10)
+        apiKeyPrefix: geminiKey?.substring(0, 10)
       });
       
-      if (!currentSettings.geminiApiKey) {
-        throw new Error('請先設定 Gemini API 金鑰');
+      if (!geminiKey) {
+        throw new Error('請先設定 API 金鑰');
       }
       
-      const geminiClient = new GeminiAPIClient(currentSettings.geminiApiKey, {
+      const geminiClient = new GeminiAPIClient(geminiKey, {
         preferredModel: currentSettings.geminiPreferredModel,
         enableFallback: currentSettings.geminiEnableFallback,
         retryConfig: currentSettings.geminiRetryConfig,
@@ -849,7 +1397,7 @@ const App: React.FC = () => {
         error: error instanceof Error ? error.message : error,
         stack: error instanceof Error ? error.stack : undefined,
         settings: {
-          hasApiKey: !!debugSettings.geminiApiKey,
+          hasApiKey: !!getGeminiKey(debugSettings),
           preferredModel: debugSettings.geminiPreferredModel,
           enableFallback: debugSettings.geminiEnableFallback,
           retryConfig: debugSettings.geminiRetryConfig
@@ -893,36 +1441,6 @@ const App: React.FC = () => {
     }
   };
 
-  // 使用 Mock API 進行轉錄
-  const startMockTranscription = async (jobId: string) => {
-    // 模擬轉錄過程
-    const stages = [
-      { status: 'queued' as const, progress: 0, message: '排隊中...' },
-      { status: 'stt' as const, progress: 30, message: '語音轉文字中...' },
-      { status: 'summarize' as const, progress: 70, message: '生成摘要中...' },
-      { status: 'done' as const, progress: 100, message: '轉錄完成！' }
-    ];
-
-    for (const stage of stages) {
-      await new Promise(resolve => setTimeout(resolve, 1500)); // 每階段等待 1.5 秒
-      
-      const updateData = {
-        status: stage.status,
-        progress: stage.progress,
-        ...(stage.status === 'done' ? {
-          transcript: '這是模擬的語音轉文字結果。\n\n說話者1: 大家好，歡迎參加今天的會議。\n說話者2: 謝謝，我們開始討論今天的議題吧。',
-          summary: '# 會議記錄\n\n## 會議摘要\n這是一個模擬的會議摘要，展示了系統的功能。\n\n## 重點討論\n1. 項目進度回顧\n2. 下週計劃安排\n\n## 決議事項\n- 確認專案時程\n- 分配工作任務'
-        } : {})
-      };
-      updateJob(jobId, updateData);
-      
-      setRecordingStatus(stage.message);
-      
-      if (stage.status === 'done') {
-        setRecordingStatus('模擬轉錄完成！可到「任務」或「結果」頁面查看');
-      }
-    }
-  };
 
   // 處理檔案上傳
   const handleFileUpload = async (file: File) => {
@@ -994,6 +1512,7 @@ const App: React.FC = () => {
       // 更新作業結果
       updateJob(jobId, {
         transcript: result.transcript?.segments?.map(s => s.text).join('\n') || '',
+        transcriptSegments: result.transcript?.segments || [],
         summary: result.summary?.minutesMd || ''
       });
       
@@ -1653,15 +2172,66 @@ const App: React.FC = () => {
                 ) : (
                   // 完整逐字稿模式
                   currentJob.transcript ? (
-                    <div style={{
-                      whiteSpace: 'pre-wrap',
-                      fontFamily: 'system-ui, -apple-system, sans-serif',
-                      lineHeight: '1.8',
-                      fontSize: '1rem',
-                      color: '#111827'
-                    }}>
-                      {currentJob.transcript}
-                    </div>
+                    currentJob.transcriptSegments && currentJob.transcriptSegments.length > 0 ? (
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem' }}>
+                        {currentJob.transcriptSegments.map((segment, index) => {
+                          const startLabel = typeof segment.start === 'number'
+                            ? formatSecondsToTimestamp(segment.start)
+                            : segment.start ?? '--:--';
+                          const endLabel = typeof segment.end === 'number'
+                            ? formatSecondsToTimestamp(segment.end)
+                            : segment.end ?? '--:--';
+                          return (
+                          <div
+                            key={`${segment.start}-${segment.end}-${index}`}
+                            style={{
+                              backgroundColor: '#fff',
+                              border: '1px solid #e5e7eb',
+                              borderRadius: '6px',
+                              padding: '1rem',
+                              display: 'flex',
+                              gap: '1rem',
+                              alignItems: 'flex-start',
+                              boxShadow: '0 1px 2px rgba(15, 23, 42, 0.05)'
+                            }}
+                          >
+                            <div style={{
+                              minWidth: '100px',
+                              fontWeight: 600,
+                              color: '#1f2937'
+                            }}>
+                              {segment.speaker}
+                              <div style={{
+                                fontSize: '0.75rem',
+                                color: '#6b7280',
+                                marginTop: '0.25rem'
+                              }}>
+                                {startLabel} - {endLabel}
+                              </div>
+                            </div>
+                            <div style={{
+                              flex: 1,
+                              fontSize: '0.95rem',
+                              lineHeight: 1.7,
+                              color: '#111827'
+                            }}>
+                              {segment.text}
+                            </div>
+                          </div>
+                          );
+                        })}
+                      </div>
+                    ) : (
+                      <div style={{
+                        whiteSpace: 'pre-wrap',
+                        fontFamily: 'system-ui, -apple-system, sans-serif',
+                        lineHeight: '1.8',
+                        fontSize: '1rem',
+                        color: '#111827'
+                      }}>
+                        {currentJob.transcript}
+                      </div>
+                    )
                   ) : (
                     <div style={{ 
                       textAlign: 'center', 
@@ -1765,506 +2335,7 @@ const App: React.FC = () => {
         );
       case 'settings':
         return (
-          <div style={{ textAlign: 'left', minWidth: '600px', maxWidth: '800px' }}>
-            <h2 style={{ color: '#111827', marginBottom: '1.5rem', textAlign: 'center' }}>應用程式設定</h2>
-            
-            <div style={{ 
-              backgroundColor: 'white',
-              border: '1px solid #e5e7eb',
-              borderRadius: '8px',
-              padding: '2rem'
-            }}>
-              {/* API 模式切換 */}
-              <div style={{ marginBottom: '2rem' }}>
-                <h3 style={{ color: '#1f2937', marginBottom: '1rem', fontSize: '18px' }}>
-                  🔧 API 模式
-                </h3>
-                
-                <div style={{ 
-                  padding: '1rem',
-                  backgroundColor: settings.useGemini ? '#f0fdf4' : '#dbeafe',
-                  border: '1px solid ' + (settings.useGemini ? '#a7f3d0' : '#bae6fd'),
-                  borderRadius: '6px',
-                  marginBottom: '1rem'
-                }}>
-                  <div style={{ 
-                    display: 'flex', 
-                    alignItems: 'center', 
-                    marginBottom: '0.5rem',
-                    fontWeight: 'bold',
-                    color: settings.useGemini ? '#065f46' : '#1e40af'
-                  }}>
-                    {settings.useGemini 
-                      ? '🤖 Google Gemini AI 模式'
-                      : '🌐 其他 API 模式'
-                    }
-                  </div>
-                  <div style={{ fontSize: '14px', color: '#6b7280' }}>
-                    {settings.useGemini
-                      ? '使用 Google Gemini 2.5 Pro 進行高質量的語音轉文字和智能摘要。支援多說話者識別、時間軸標記和複雜會議分析。'
-                      : '連接其他真實 API 服務，進行語音轉文字和智能摘要處理。'
-                    }
-                  </div>
-                </div>
-                
-                <div style={{ display: 'flex', gap: '0.75rem', flexWrap: 'wrap' }}>
-                  <button
-                    onClick={() => {
-                      updateSettings({ useGemini: true });
-                    }}
-                    style={{
-                      padding: '0.75rem 1rem',
-                      backgroundColor: settings.useGemini ? '#10b981' : '#e5e7eb',
-                      color: settings.useGemini ? 'white' : '#6b7280',
-                      border: 'none',
-                      borderRadius: '6px',
-                      cursor: 'pointer',
-                      fontWeight: '500',
-                      fontSize: '14px'
-                    }}
-                  >
-                    🤖 Gemini AI
-                  </button>
-                  
-                  <button
-                    onClick={() => {
-                      updateSettings({ useGemini: false });
-                    }}
-                    style={{
-                      padding: '0.75rem 1rem',
-                      backgroundColor: !settings.useGemini ? '#3b82f6' : '#e5e7eb',
-                      color: !settings.useGemini ? 'white' : '#6b7280',
-                      border: 'none',
-                      borderRadius: '6px',
-                      cursor: 'pointer',
-                      fontWeight: '500',
-                      fontSize: '14px'
-                    }}
-                  >
-                    🌐 其他 API
-                  </button>
-                </div>
-              </div>
-              
-              {/* 真實 API 設定 */}
-              {!settings.useMock && (
-                <div style={{ 
-                  marginBottom: '2rem',
-                  padding: '1.5rem',
-                  backgroundColor: '#f8fafc',
-                  border: '1px solid #e2e8f0',
-                  borderRadius: '6px'
-                }}>
-                  <h3 style={{ color: '#1f2937', marginBottom: '1rem', fontSize: '18px' }}>
-                    {settings.useGemini ? '🤖 Google Gemini API 配置' : '🔑 其他 API 配置'}
-                  </h3>
-                  
-                  <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem' }}>
-                    {/* Gemini API Key */}
-                    {settings.useGemini ? (
-                      <div>
-                        <label style={{ 
-                          display: 'block', 
-                          marginBottom: '0.5rem', 
-                          fontWeight: '500',
-                          color: '#374151'
-                        }}>
-                          Google Gemini API Key:
-                        </label>
-                        <input
-                          type="password"
-                          value={settings.geminiApiKey || ''}
-                          onChange={(e) => updateSettings({ geminiApiKey: e.target.value })}
-                          style={{
-                            width: '100%',
-                            padding: '0.75rem',
-                            border: '1px solid #d1d5db',
-                            borderRadius: '4px',
-                            fontSize: '14px'
-                          }}
-                          placeholder="請輸入您的 Google Gemini API Key"
-                        />
-                        <div style={{ fontSize: '12px', color: '#6b7280', marginTop: '0.5rem' }}>
-                          到 <a href="https://makersuite.google.com/app/apikey" target="_blank" style={{ color: '#3b82f6' }}>
-                            Google AI Studio
-                          </a> 申請免費的 API Key
-                        </div>
-                      </div>
-                    ) : (
-                      <>
-                        {/* API URL */}
-                        <div>
-                          <label style={{ 
-                            display: 'block', 
-                            marginBottom: '0.5rem', 
-                            fontWeight: '500',
-                            color: '#374151'
-                          }}>
-                            API 基礎 URL:
-                          </label>
-                          <input
-                            type="text"
-                            value={settings.baseURL}
-                            onChange={(e) => updateSettings({ baseURL: e.target.value })}
-                            style={{
-                              width: '100%',
-                              padding: '0.75rem',
-                              border: '1px solid #d1d5db',
-                              borderRadius: '4px',
-                              fontSize: '14px'
-                            }}
-                            placeholder="https://api.example.com"
-                          />
-                        </div>
-                        
-                        {/* API Key */}
-                        <div>
-                          <label style={{ 
-                            display: 'block', 
-                            marginBottom: '0.5rem', 
-                            fontWeight: '500',
-                            color: '#374151'
-                          }}>
-                            API Key:
-                          </label>
-                          <input
-                            type="password"
-                            value={settings.apiKey}
-                            onChange={(e) => updateSettings({ apiKey: e.target.value })}
-                            style={{
-                              width: '100%',
-                              padding: '0.75rem',
-                              border: '1px solid #d1d5db',
-                              borderRadius: '4px',
-                              fontSize: '14px'
-                            }}
-                            placeholder="your-api-key-here"
-                          />
-                        </div>
-                      </>
-                    )}
-                    
-                    {/* Environment - 只對非 Gemini API 顯示 */}
-                    {!settings.useGemini && (
-                      <div>
-                        <label style={{ 
-                          display: 'block', 
-                          marginBottom: '0.5rem', 
-                          fontWeight: '500',
-                          color: '#374151'
-                        }}>
-                          環境:
-                        </label>
-                        <select
-                          value={settings.environment}
-                          onChange={(e) => updateSettings({ environment: e.target.value as any })}
-                          style={{
-                            width: '100%',
-                            padding: '0.75rem',
-                            border: '1px solid #d1d5db',
-                            borderRadius: '4px',
-                            fontSize: '14px',
-                            backgroundColor: 'white'
-                          }}
-                        >
-                          <option value="dev">開發環境</option>
-                          <option value="stg">測試環境</option>
-                          <option value="prod">生產環境</option>
-                        </select>
-                      </div>
-                    )}
-                    
-                    <button
-                      onClick={() => {
-                        updateAPISettings(settings);
-                        alert('API 設定已更新！');
-                      }}
-                      style={{
-                        padding: '0.75rem 1.5rem',
-                        backgroundColor: '#10b981',
-                        color: 'white',
-                        border: 'none',
-                        borderRadius: '6px',
-                        cursor: 'pointer',
-                        fontWeight: '500',
-                        marginTop: '0.5rem'
-                      }}
-                    >
-                      💾 保存設定
-                    </button>
-                  </div>
-                </div>
-              )}
-              
-              {/* 錄音儲存設定 */}
-              <div style={{ marginBottom: '2rem' }}>
-                <h3 style={{ color: '#1f2937', marginBottom: '1rem', fontSize: '18px' }}>
-                  💾 錄音儲存位置
-                </h3>
-                
-                <div style={{ 
-                  padding: '1rem',
-                  backgroundColor: '#f9fafb',
-                  border: '1px solid #e5e7eb',
-                  borderRadius: '6px',
-                  marginBottom: '1rem'
-                }}>
-                  <div style={{ marginBottom: '1rem' }}>
-                    <label style={{ 
-                      display: 'block', 
-                      marginBottom: '0.5rem', 
-                      fontWeight: '500',
-                      color: '#374151'
-                    }}>
-                      儲存路徑：
-                    </label>
-                    <div style={{ display: 'flex', gap: '0.5rem' }}>
-                      <input
-                        type="text"
-                        value={settings.recordingSavePath || ''}
-                        onChange={(e) => updateSettings({ recordingSavePath: e.target.value })}
-                        placeholder="留空使用系統預設下載資料夾"
-                        style={{
-                          flex: 1,
-                          padding: '0.75rem',
-                          border: '1px solid #d1d5db',
-                          borderRadius: '4px',
-                          fontSize: '14px'
-                        }}
-                      />
-                      <button
-                        onClick={() => {
-                          // 這裡將來會添加選擇資料夾的功能
-                          const input = document.createElement('input');
-                          input.type = 'file';
-                          input.webkitdirectory = true;
-                          input.onchange = (e) => {
-                            const files = (e.target as HTMLInputElement).files;
-                            if (files && files.length > 0) {
-                              const path = files[0].webkitRelativePath.split('/')[0];
-                              updateSettings({ recordingSavePath: path });
-                            }
-                          };
-                          input.click();
-                        }}
-                        style={{
-                          padding: '0.75rem 1rem',
-                          backgroundColor: '#6b7280',
-                          color: 'white',
-                          border: 'none',
-                          borderRadius: '4px',
-                          cursor: 'pointer',
-                          fontSize: '14px',
-                          whiteSpace: 'nowrap'
-                        }}
-                      >
-                        選擇資料夾
-                      </button>
-                    </div>
-                    <div style={{ fontSize: '12px', color: '#6b7280', marginTop: '0.5rem' }}>
-                      {settings.recordingSavePath ? `錄音將儲存至：${settings.recordingSavePath}` : '錄音將儲存至系統預設下載資料夾'}
-                    </div>
-                  </div>
-                </div>
-              </div>
-              
-              {/* 使用說明 */}
-              <div style={{
-                padding: '1.5rem',
-                backgroundColor: '#f0f9ff',
-                border: '1px solid #bae6fd',
-                borderRadius: '6px'
-              }}>
-                <h3 style={{ color: '#1f2937', marginBottom: '1rem', fontSize: '18px' }}>
-                  📖 使用說明
-                </h3>
-                <ul style={{ 
-                  margin: 0, 
-                  paddingLeft: '1.5rem',
-                  color: '#374151',
-                  lineHeight: '1.6'
-                }}>
-                  <li><strong>測試模式</strong>：使用內建的模擬數據，適合測試應用功能，無需任何 API 金鑰</li>
-                  <li><strong>Google Gemini AI</strong>：使用 Google 最新的 Gemini 2.5 Pro 模型，支援高質量語音轉文字、多說話者識別、時間軸分析和智能摘要生成</li>
-                  <li><strong>其他 API</strong>：連接自訂的語音轉文字服務，需要配置 API 端點和金鑰</li>
-                  <li>切換模式後，新的錄音和上傳檔案會使用新的設定</li>
-                  <li>Gemini API 提供免費額度，到 Google AI Studio 即可申請</li>
-                  <li>真實 API 需要網路連線和有效的服務金鑰</li>
-                </ul>
-              </div>
-              
-              {/* 應用更新 */}
-              <div style={{
-                padding: '1.5rem',
-                backgroundColor: updateAvailable ? '#fef3cd' : '#f8f9fa',
-                border: updateAvailable ? '1px solid #f59e0b' : '1px solid #dee2e6',
-                borderRadius: '6px'
-              }}>
-                <h3 style={{ color: '#1f2937', marginBottom: '1rem', fontSize: '18px' }}>
-                  🔄 應用程式更新
-                </h3>
-                
-                {updateAvailable ? (
-                  <div style={{ color: '#374151' }}>
-                    <p style={{ marginBottom: '1rem' }}>
-                      🎉 發現新版本 <strong>{updateInfo?.version}</strong>！
-                    </p>
-                    {updateDownloaded ? (
-                      <div style={{ marginBottom: '1rem' }}>
-                        <p style={{ marginBottom: '0.75rem' }}>更新已下載完成，可以立即安裝。</p>
-                        <div style={{ display: 'flex', gap: '0.5rem' }}>
-                          <button
-                            onClick={() => window.electronAPI?.updater.installUpdate()}
-                            style={{
-                              padding: '0.75rem 1rem',
-                              backgroundColor: '#10b981',
-                              color: 'white',
-                              border: 'none',
-                              borderRadius: '4px',
-                              cursor: 'pointer',
-                              fontSize: '14px'
-                            }}
-                          >
-                            🔁 立即重啟安裝
-                          </button>
-                          <button
-                            onClick={() => {
-                              setUpdateAvailable(false);
-                              setUpdateDownloaded(false);
-                              setUpdateInfo(null);
-                              setUpdateProgress(null);
-                            }}
-                            style={{
-                              padding: '0.75rem 1rem',
-                              backgroundColor: '#6b7280',
-                              color: 'white',
-                              border: 'none',
-                              borderRadius: '4px',
-                              cursor: 'pointer',
-                              fontSize: '14px'
-                            }}
-                          >
-                            稍後再說
-                          </button>
-                        </div>
-                      </div>
-                    ) : updateProgress ? (
-                      <div style={{ marginBottom: '1rem' }}>
-                        <div style={{
-                          width: '100%',
-                          backgroundColor: '#e5e7eb',
-                          borderRadius: '4px',
-                          overflow: 'hidden',
-                          marginBottom: '0.5rem'
-                        }}>
-                          <div style={{
-                            width: `${updateProgress.percent}%`,
-                            backgroundColor: '#10b981',
-                            height: '8px',
-                            transition: 'width 0.3s ease'
-                          }}></div>
-                        </div>
-                        <p style={{ fontSize: '14px', color: '#6b7280' }}>
-                          {updateProgress.status}
-                        </p>
-                      </div>
-                    ) : (
-                      <div style={{ display: 'flex', gap: '0.5rem', marginBottom: '1rem' }}>
-                        <button
-                          onClick={async () => {
-                            if (window.electronAPI?.updater) {
-                              try {
-                                setUpdateProgress({ percent: 0, status: '準備下載更新...' });
-                                setUpdateDownloaded(false);
-                                const result = await window.electronAPI.updater.downloadUpdate();
-                                if (!result.success) {
-                                  alert('下載更新失敗: ' + result.error);
-                                  setUpdateProgress(null);
-                                }
-                              } catch (error) {
-                                alert('下載更新時發生錯誤');
-                                setUpdateProgress(null);
-                              }
-                            }
-                          }}
-                          style={{
-                            padding: '0.75rem 1rem',
-                            backgroundColor: '#10b981',
-                            color: 'white',
-                            border: 'none',
-                            borderRadius: '4px',
-                            cursor: 'pointer',
-                            fontSize: '14px'
-                          }}
-                        >
-                          📥 下載更新
-                        </button>
-                        <button
-                          onClick={() => {
-                            setUpdateAvailable(false);
-                            setUpdateInfo(null);
-                          }}
-                          style={{
-                            padding: '0.75rem 1rem',
-                            backgroundColor: '#6b7280',
-                            color: 'white',
-                            border: 'none',
-                            borderRadius: '4px',
-                            cursor: 'pointer',
-                            fontSize: '14px'
-                          }}
-                        >
-                          稍後再說
-                        </button>
-                      </div>
-                    )}
-                  </div>
-                ) : (
-                  <div style={{ color: '#374151' }}>
-                    <p style={{ marginBottom: '1rem' }}>
-                      目前版本：<strong>{appVersion || '取得版本中...'}</strong>
-                    </p>
-                    <button
-                      onClick={async () => {
-                        if (window.electronAPI?.updater) {
-                          try {
-                            const result = await window.electronAPI.updater.checkForUpdates();
-                            if (result.available && result.version) {
-                              setUpdateAvailable(true);
-                              setUpdateDownloaded(false);
-                              setUpdateProgress(null);
-                              setUpdateInfo({ version: result.version });
-                            } else {
-                              setUpdateAvailable(false);
-                              setUpdateDownloaded(false);
-                              setUpdateInfo(null);
-                              setUpdateProgress(null);
-                              alert(result.message || '當前已是最新版本');
-                            }
-                          } catch (error) {
-                            alert('檢查更新時發生錯誤');
-                          }
-                        } else {
-                          alert('更新功能僅在 Electron 環境下可用');
-                        }
-                      }}
-                      style={{
-                        padding: '0.75rem 1rem',
-                        backgroundColor: '#3b82f6',
-                        color: 'white',
-                        border: 'none',
-                        borderRadius: '4px',
-                        cursor: 'pointer',
-                        fontSize: '14px'
-                      }}
-                    >
-                      🔍 檢查更新
-                    </button>
-                  </div>
-                )}
-              </div>
-            </div>
-          </div>
+          <div style={{ width: '100%', maxWidth: '960px', margin: '0 auto', textAlign: 'left' }}><SettingsPage /></div>
         );
       case 'prompts':
         return <PromptsPage />;
@@ -2288,6 +2359,15 @@ const App: React.FC = () => {
         activeJobCount={jobs.filter(job => job.status !== 'done' && job.status !== 'failed').length}
         completedJobCount={jobs.filter(job => job.status === 'done').length}
         settings={settings}
+        appVersion={appVersion}
+        updateStatus={updateStatusMessage}
+        updateAvailable={updateAvailable}
+        updateDownloaded={updateDownloaded}
+        updateProgress={updateProgress}
+        updateInfo={updateInfo}
+        onCheckUpdates={handleCheckUpdates}
+        onDownloadUpdate={handleDownloadUpdate}
+        onInstallUpdate={handleInstallUpdate}
       />
 
       {/* Main Content */}

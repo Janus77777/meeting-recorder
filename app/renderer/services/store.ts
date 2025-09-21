@@ -17,41 +17,79 @@ interface SettingsState {
   resetSettings: () => void;
 }
 
+const ensureSettingsDefaults = (settings: AppSettings): AppSettings => {
+  const mergedGoogleStt = {
+    ...(DEFAULT_SETTINGS.googleCloudSTT ?? {}),
+    ...(settings.googleCloudSTT ?? {})
+  };
+
+  return {
+    ...DEFAULT_SETTINGS,
+    ...settings,
+    transcriptionMode: settings.transcriptionMode ?? DEFAULT_SETTINGS.transcriptionMode ?? 'gemini_direct',
+    googleCloudSTT: mergedGoogleStt
+  };
+};
+
 export const useSettingsStore = create<SettingsState>()(
   persist(
     (set, get) => ({
       settings: DEFAULT_SETTINGS,
       
       updateSettings: (newSettings) => {
-        const updated = { ...get().settings, ...newSettings };
-        console.log('🔧 Updating settings:', updated);
-        set({ settings: updated });
+        const current = ensureSettingsDefaults(get().settings);
+        const merged = ensureSettingsDefaults({
+          ...current,
+          ...newSettings,
+          googleCloudSTT: {
+            ...current.googleCloudSTT,
+            ...(newSettings.googleCloudSTT ?? {})
+          }
+        });
+        console.log('🔧 Updating settings:', merged);
+        set({ settings: merged });
         
         // Update API client when settings change
-        updateAPISettings(updated);
+        updateAPISettings(merged);
       },
       
       resetSettings: () => {
         console.log('🔄 Resetting settings to default');
-        set({ settings: DEFAULT_SETTINGS });
-        updateAPISettings(DEFAULT_SETTINGS);
+        const defaults = ensureSettingsDefaults(DEFAULT_SETTINGS);
+        set({ settings: defaults });
+        updateAPISettings(defaults);
       }
     }),
     {
       name: 'meeting-recorder-settings',
-      version: 1,
+      version: 2,
+      migrate: (persisted, version) => {
+        if (!persisted || version < 2) {
+          return { settings: ensureSettingsDefaults(DEFAULT_SETTINGS) };
+        }
+
+        const persistedSettings = (persisted as { settings?: AppSettings }).settings;
+        if (!persistedSettings) {
+          return { settings: ensureSettingsDefaults(DEFAULT_SETTINGS) };
+        }
+
+        return {
+          settings: ensureSettingsDefaults({ ...DEFAULT_SETTINGS, ...persistedSettings })
+        };
+      },
       onRehydrateStorage: () => (state) => {
         console.log('💾 Rehydrating settings from localStorage:', state);
         if (state && state.settings) {
+          const merged = ensureSettingsDefaults(state.settings as AppSettings);
+          state.settings = merged;
           console.log('✅ Settings restored:', {
-            hasGeminiKey: !!state.settings.geminiApiKey,
-            useGemini: state.settings.useGemini,
-            environment: state.settings.environment
+            hasGeminiKey: !!merged.geminiApiKey,
+            transcriptionMode: merged.transcriptionMode
           });
-          // 確保 API 設定被更新
-          updateAPISettings(state.settings);
+          updateAPISettings(merged);
         } else {
           console.log('⚠️ No settings found in localStorage, using defaults');
+          updateAPISettings(DEFAULT_SETTINGS);
         }
       },
       skipHydration: false,
@@ -182,13 +220,22 @@ export const useJobsStore = create<JobsState>()(
     }),
     {
       name: 'meeting-recorder-jobs',
-      partialize: (state) => ({ 
-        jobs: state.jobs.map(job => ({
-          ...job,
-          // Don't persist large result data
-          result: undefined
-        }))
-      })
+      partialize: (state) => ({
+        jobs: state.jobs,
+        currentJob: state.currentJob
+      }),
+      onRehydrateStorage: () => (state) => {
+        if (state) {
+          const jobs = (state as JobsState).jobs ?? [];
+          const currentJob = (state as JobsState).currentJob ?? null;
+          if (currentJob) {
+            const matched = jobs.find(job => job.id === currentJob.id) ?? jobs[0] ?? null;
+            (state as JobsState).currentJob = matched;
+          } else if (jobs.length > 0) {
+            (state as JobsState).currentJob = jobs[0];
+          }
+        }
+      }
     }
   )
 );

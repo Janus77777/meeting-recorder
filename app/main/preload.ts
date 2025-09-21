@@ -1,4 +1,13 @@
 import { contextBridge, ipcRenderer } from 'electron';
+import {
+  STTInitializeRequest,
+  STTPrepareAudioRequest,
+  STTPrepareAudioResponse,
+  STTTranscriptionRequest,
+  STTTranscriptionResponse,
+  STTStatusResponse,
+  STTProgressEvent
+} from '@shared/types';
 
 // Define the API that will be exposed to the renderer process
 export interface ElectronAPI {
@@ -61,6 +70,14 @@ export interface ElectronAPI {
     onUpdateDownloaded: (callback: (info: { version: string }) => void) => void;
   };
 
+  stt: {
+    initialize: (payload: STTInitializeRequest) => Promise<{ success: boolean; error?: string; status?: STTStatusResponse }>;
+    getStatus: () => Promise<STTStatusResponse>;
+    prepareAudio: (payload: STTPrepareAudioRequest) => Promise<STTPrepareAudioResponse>;
+    transcribe: (payload: STTTranscriptionRequest) => Promise<STTTranscriptionResponse>;
+    onProgress: (callback: (event: STTProgressEvent) => void) => void;
+  };
+
   // Development helpers (only in development)
   dev?: {
     openDevTools: () => Promise<void>;
@@ -116,6 +133,17 @@ const electronAPI: ElectronAPI = {
     onUpdateDownloaded: (callback) => {
       ipcRenderer.removeAllListeners('update-downloaded');
       ipcRenderer.on('update-downloaded', (event, info) => callback(info));
+    }
+  },
+
+  stt: {
+    initialize: (payload) => ipcRenderer.invoke('stt:initialize', payload),
+    getStatus: () => ipcRenderer.invoke('stt:getStatus'),
+    prepareAudio: (payload) => ipcRenderer.invoke('stt:prepareAudio', payload),
+    transcribe: (payload) => ipcRenderer.invoke('stt:transcribe', payload),
+    onProgress: (callback) => {
+      ipcRenderer.removeAllListeners('stt:progress');
+      ipcRenderer.on('stt:progress', (_event, progress: STTProgressEvent) => callback(progress));
     }
   },
 

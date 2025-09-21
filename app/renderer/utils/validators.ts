@@ -45,36 +45,31 @@ export interface ValidationResult {
 export const validateSettings = (settings: AppSettings): ValidationResult => {
   const errors: Record<string, string> = {};
 
-  const usingGemini = settings.useGemini !== false;
-
-  if (usingGemini) {
-    if (settings.geminiApiKey && settings.geminiApiKey.trim() && !isValidAPIKey(settings.geminiApiKey.trim())) {
-      errors.geminiApiKey = 'Gemini API Key 格式不正確（8-256 字元，不含空格）';
-    }
-  } else {
-    const openRouterBaseURL = (settings.openRouterBaseURL || settings.baseURL || '').trim();
-    if (!openRouterBaseURL) {
-      errors.baseURL = 'OpenRouter 基礎網址不能為空';
-    } else if (!isValidAPIEndpoint(openRouterBaseURL)) {
-      errors.baseURL = 'OpenRouter 基礎網址格式不正確';
-    }
-
-    if (!settings.useMock) {
-      const openRouterKey = (settings.openRouterApiKey || settings.apiKey || '').trim();
-      if (!openRouterKey) {
-        errors.apiKey = 'OpenRouter API Key 不能為空';
-      } else if (!isValidAPIKey(openRouterKey)) {
-        errors.apiKey = 'OpenRouter API Key 格式不正確（8-256 字元，不含空格）';
-      }
-    }
-
-    if (!settings.openRouterModel || !settings.openRouterModel.trim()) {
-      errors.openRouterModel = '請輸入要使用的 OpenRouter 模型 ID';
-    }
+  // Only validate Gemini settings now
+  if (settings.geminiApiKey && settings.geminiApiKey.trim() && !isValidAPIKey(settings.geminiApiKey.trim())) {
+    errors.geminiApiKey = 'Gemini API Key 格式不正確（8-256 字元，不含空格）';
   }
 
-  if (!usingGemini && settings.environment && !['dev', 'stg', 'prod'].includes(settings.environment)) {
-    errors.environment = '無效的環境設定';
+  const transcriptionMode = settings.transcriptionMode ?? 'gemini_direct';
+
+  if (transcriptionMode === 'hybrid_stt') {
+    const stt = settings.googleCloudSTT ?? {};
+
+    if (!stt.projectId || !stt.projectId.trim()) {
+      errors['googleCloudSTT.projectId'] = '請輸入 Google Cloud Project ID';
+    }
+
+    if (!stt.location || !stt.location.trim()) {
+      errors['googleCloudSTT.location'] = '請輸入 Location，例如 global 或 us-west1';
+    }
+
+    if (!stt.recognizerId || !stt.recognizerId.trim()) {
+      errors['googleCloudSTT.recognizerId'] = '請輸入 Recognizer ID';
+    }
+
+    if (!stt.keyFilePath || !stt.keyFilePath.trim()) {
+      errors['googleCloudSTT.keyFilePath'] = '請指定 Service Account Key 檔案路徑';
+    }
   }
 
   return {
@@ -213,36 +208,14 @@ export const checkNetworkConnectivity = async (): Promise<boolean> => {
 // API endpoint health check
 export const checkAPIHealth = async (settings: AppSettings): Promise<boolean> => {
   try {
-    const usingGemini = settings.useGemini !== false;
-
-    if (usingGemini) {
-      if (!settings.geminiApiKey || !settings.geminiApiKey.trim()) {
-        return false;
-      }
-
-      const url = `https://generativelanguage.googleapis.com/v1beta/models?key=${encodeURIComponent(settings.geminiApiKey.trim())}`;
-      const response = await fetch(url, {
-        method: 'GET',
-        signal: AbortSignal.timeout(10000)
-      });
-
-      return response.ok;
-    }
-
-    const baseURL = (settings.openRouterBaseURL || settings.baseURL || '').replace(/\/$/, '');
-    const apiKey = (settings.openRouterApiKey || settings.apiKey || '').trim();
-
-    if (!baseURL || !apiKey) {
+    // Only check Gemini API health now
+    if (!settings.geminiApiKey || !settings.geminiApiKey.trim()) {
       return false;
     }
 
-    const response = await fetch(`${baseURL}/models`, {
+    const url = `https://generativelanguage.googleapis.com/v1beta/models?key=${encodeURIComponent(settings.geminiApiKey.trim())}`;
+    const response = await fetch(url, {
       method: 'GET',
-      headers: {
-        'Authorization': `Bearer ${apiKey}`,
-        'X-Title': settings.openRouterTitle || 'Meeting Recorder',
-        'HTTP-Referer': settings.openRouterReferer || 'https://github.com/Janus77777/meeting-recorder'
-      },
       signal: AbortSignal.timeout(10000)
     });
 

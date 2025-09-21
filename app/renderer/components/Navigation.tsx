@@ -115,17 +115,23 @@ export const Navigation: React.FC = () => {
         <div className="text-xs text-gray-500">
           <div className="flex items-center justify-between mb-1">
             <span>模式</span>
-            <span className={`px-2 py-0.5 rounded text-xs font-medium ${
-              settings.useMock
-                ? 'bg-yellow-100 text-yellow-700'
-                : 'bg-green-100 text-green-700'
-            }`}>
-              {settings.useMock ? 'Mock' : 'Live'}
+            <span className="px-2 py-0.5 rounded text-xs font-medium bg-green-100 text-green-700">
+              Live
             </span>
           </div>
           <div className="flex items-center justify-between">
-            <span>環境</span>
-            <span className="uppercase">{settings.environment}</span>
+            <span>API</span>
+            <span
+              style={{
+                maxWidth: '120px',
+                overflow: 'hidden',
+                textOverflow: 'ellipsis',
+                whiteSpace: 'nowrap',
+                textAlign: 'right'
+              }}
+            >
+              {settings.baseURL || '未設定'}
+            </span>
           </div>
         </div>
       </div>

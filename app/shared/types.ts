@@ -86,6 +86,7 @@ export interface MeetingJob {
   audioFile?: string;
   result?: ResultResponse;
   transcript?: string;
+  transcriptSegments?: TranscriptSegment[];
   summary?: string;
 }
 
@@ -100,7 +101,6 @@ export interface AppSettings {
   baseURL: string;
   apiKey: string;
   environment: 'dev' | 'stg' | 'prod';
-  useMock: boolean;
   // Gemini API 設定
   useGemini?: boolean;
   geminiApiKey?: string;
@@ -114,13 +114,9 @@ export interface AppSettings {
   };
   geminiDiagnosticMode?: boolean;         // 診斷模式：啟用詳細日誌
   geminiHealthCheckEnabled?: boolean;     // 啟用 API 健康檢查
-  // OpenRouter 設定
-  openRouterApiKey?: string;
-  openRouterBaseURL?: string;
-  openRouterModel?: string;
-  openRouterFallbackModels?: string;
-  openRouterReferer?: string;
-  openRouterTitle?: string;
+  // 轉錄模式設定
+  transcriptionMode?: TranscriptionMode;
+  googleCloudSTT?: GoogleCloudSTTSettings;
   // 自訂提示詞設定
   customTranscriptPrompt?: string;
   customSummaryPrompt?: string;
@@ -164,4 +160,85 @@ export interface ToastMessage {
   type: 'success' | 'error' | 'info';
   message: string;
   duration?: number;
+}
+
+// Transcription mode & Google STT 設定
+export type TranscriptionMode = 'gemini_direct' | 'hybrid_stt';
+
+export interface GoogleCloudSTTSettings {
+  enabled?: boolean;
+  projectId?: string;
+  location?: string;
+  recognizerId?: string;
+  keyFilePath?: string;
+  languageCode?: string;
+  model?: string;
+  enableSpeakerDiarization?: boolean;
+  minSpeakerCount?: number;
+  maxSpeakerCount?: number;
+}
+
+// Google STT IPC 型別
+export interface STTInitializeRequest {
+  projectId: string;
+  location: string;
+  recognizerId: string;
+  keyFilePath?: string;
+  model?: string;
+}
+
+export interface STTPrepareAudioRequest {
+  sourcePath: string;
+  mimeType?: string;
+  sampleRate?: number;
+}
+
+export interface STTPrepareAudioResponse {
+  success: boolean;
+  wavPath?: string;
+  durationSeconds?: number;
+  error?: string;
+}
+
+export interface STTTranscriptionRequest {
+  filePath?: string;
+  sourcePath?: string;
+  startTimeSeconds?: number;
+  endTimeSeconds?: number;
+  languageCode?: string;
+  enableWordTimeOffsets?: boolean;
+  enableSpeakerDiarization?: boolean;
+  minSpeakerCount?: number;
+  maxSpeakerCount?: number;
+  mimeType?: string;
+}
+
+export interface STTTranscriptSegment {
+  text: string;
+  startTime?: number;
+  endTime?: number;
+  confidence?: number;
+  speakerTag?: number;
+}
+
+export interface STTTranscriptionResponse {
+  success: boolean;
+  transcript?: string;
+  segments?: STTTranscriptSegment[];
+  error?: string;
+  rawResponse?: unknown;
+}
+
+export interface STTStatusResponse {
+  initialized: boolean;
+  projectId?: string;
+  location?: string;
+  recognizerId?: string;
+  model?: string;
+}
+
+export interface STTProgressEvent {
+  stage: 'uploading' | 'processing' | 'completed' | 'failed';
+  progress: number;
+  message?: string;
 }

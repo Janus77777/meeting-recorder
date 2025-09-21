@@ -23,6 +23,14 @@
 - 🔄 **進階匯出**：PDF 和 DOCX 格式匯出
 - 🔄 **自動寄信**：完成後透過 n8n 自動發送結果
 
+## 版本歷史
+
+- **v1.1.5（最新）**：導入 Google Cloud STT + Gemini 混合轉錄流程，支援自動切段、格式轉換與 Chirp 模型容錯；逐字稿顯示回復正常，並預設內建公司帳號的憑證設定。
+- **v1.1.4（commit 0c26fd7）**：Gemini 503 錯誤容錯與摘要修正，未包含 STT 介面更新。對應的發行檔維持在 `release/` 根目錄。
+- **v1.1.3（舊版）**：僅包含自動更新相關修正，所有打包檔已歸檔至 `release/(舊版)/`，僅供備查。
+
+> 與其他協作者（例如 Claude Code）同步時，請引用上述版本歷史，避免再使用舊版檔案或混淆開發基準。
+
 ## 技術架構
 
 - **前端**：Electron + React + TypeScript + Tailwind CSS
@@ -81,8 +89,9 @@
 
 1. **設定 API**
    - 前往「設定」頁面
-   - 選擇環境（dev/stg/prod）
-   - 輸入 Gemini API 基礎網址和金鑰
+   - 選擇 API 模式（Gemini / 自訂 API）
+   - 若使用 Gemini：輸入 Google Gemini API Key
+   - 若使用自訂 API：設定服務的基礎網址、API Key 與對應環境（dev/stg/prod）
 
 2. **系統音訊錄製設定（可選）**
    - 安裝 VB-Audio Virtual Cable 或類似虛擬音訊設備

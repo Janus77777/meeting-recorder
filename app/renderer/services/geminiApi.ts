@@ -870,6 +870,89 @@ ${customPrompt}`;
     }, '自訂摘要');
   }
 
+  async generateStructuredSummaryFromTranscript(transcriptText: string, customPrompt?: string) {
+    const defaultPrompt = `請閱讀以下會議逐字稿，並以 Markdown 產出結構化的會議摘要。請依照下列格式輸出，若某區段沒有內容請輸出「- 無」。
+
+# 會議摘要
+## 概要
+- …
+## 主要重點
+- …
+## 決議與結論
+- …
+## 待辦事項
+- 負責人：…，事項：…，期限：…
+## 其他備註
+- …
+
+請勿輸出 JSON，僅輸出上述 Markdown 內容。`;
+
+    const fullPrompt = `${customPrompt || defaultPrompt}
+
+逐字稿內容：
+${transcriptText}`;
+
+    return this.executeWithFallback(async (model: string) => {
+      const generateUrl = `${this.baseURL}/models/${model}:generateContent?key=${this.apiKey}`;
+
+      const requestBody = {
+        contents: [
+          {
+            parts: [
+              {
+                text: fullPrompt
+              }
+            ]
+          }
+        ],
+        generationConfig: {
+          temperature: 0.2,
+          topK: 40,
+          topP: 0.9,
+          maxOutputTokens: 4096,
+          responseMimeType: 'text/plain'
+        }
+      };
+
+      const markdownSummary = await this.retryWithExponentialBackoff(async () => {
+        console.log(`向 Gemini 請求 Markdown 摘要... (模型: ${model})`);
+        const response = await fetch(generateUrl, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify(requestBody)
+        });
+
+        if (!response.ok) {
+          const errorText = await response.text();
+          console.error(`Gemini 文字摘要請求失敗 (模型: ${model}):`, response.status, errorText);
+          throw new Error(`Gemini API 請求失敗: ${response.status}`);
+        }
+
+        const result: GeminiGenerateContentResponse = await response.json();
+        console.log(`Gemini Markdown 摘要回應 (模型: ${model}):`, result);
+
+        return this.extractTextFromResponse(result, '摘要');
+      });
+      const minutesMd = markdownSummary.trim();
+
+      const overviewMatch = minutesMd.match(/##\s*概要\s*\n([\s\S]*?)(\n##|$)/);
+      const overallSummary = overviewMatch ? overviewMatch[1].replace(/^-\s*/gm, '').trim() : minutesMd.split('\n').slice(0, 5).join(' ').trim();
+
+      return {
+        overallSummary,
+        highlights: [],
+        keyDecisions: [],
+        actionItems: [],
+        timeline: [],
+        todos: [],
+        bySpeaker: [],
+        minutesMd
+      };
+    }, '摘要');
+  }
+
   // 解析 Gemini 回應（支援 JSON 和純文字格式）
   parseTranscriptionResult(responseText: string) {
     try {
