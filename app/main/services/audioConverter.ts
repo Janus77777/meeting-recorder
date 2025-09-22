@@ -50,6 +50,52 @@ export interface ExtractSegmentResult {
  * 目前用途：將錄音結果 (WebM/Opus) 轉為 LINEAR16 WAV，供 Google STT 使用。
  */
 export class AudioConverterService {
+  constructor() {
+    this.initializeFfmpeg();
+  }
+
+  private initializeFfmpeg(): void {
+    if (process.platform === 'win32') {
+      console.log(`🔧 正在初始化 FFmpeg... process.resourcesPath: ${process.resourcesPath}`);
+
+      // 在 Windows 上，優先使用打包的 ffmpeg
+      const possiblePaths = [
+        path.join(process.resourcesPath, 'ffmpeg', 'win32-x64', 'ffmpeg.exe'), // 打包後的路徑
+        path.join(__dirname, '..', '..', '..', 'resources', 'ffmpeg', 'win32-x64', 'ffmpeg.exe'), // 開發時路徑
+        'ffmpeg', // 系統 PATH 中的 ffmpeg（備用）
+      ];
+
+      console.log('🔍 檢查 FFmpeg 路徑:');
+      for (const ffmpegPath of possiblePaths) {
+        console.log(`  - 嘗試路徑: ${ffmpegPath}`);
+        try {
+          if (fs.existsSync(ffmpegPath)) {
+            console.log(`  ✅ 路徑存在: ${ffmpegPath}`);
+            ffmpeg.setFfmpegPath(ffmpegPath);
+            console.log(`🎯 FFmpeg 路徑設定為: ${ffmpegPath}`);
+            return;
+          } else if (ffmpegPath === 'ffmpeg') {
+            console.log(`  ⚠️ 無法檢查系統 PATH，嘗試設定: ${ffmpegPath}`);
+            // 對於系統 PATH 中的 ffmpeg，我們無法直接檢查存在性，但可以嘗試設定
+            try {
+              ffmpeg.setFfmpegPath(ffmpegPath);
+              console.log(`🎯 FFmpeg 路徑設定為系統 PATH: ${ffmpegPath}`);
+              return;
+            } catch (error) {
+              console.log(`  ❌ 系統 PATH 中沒有找到 FFmpeg`);
+            }
+          } else {
+            console.log(`  ❌ 路徑不存在: ${ffmpegPath}`);
+          }
+        } catch (error) {
+          console.log(`  ❌ 無法設定 FFmpeg 路徑: ${ffmpegPath} - ${error}`);
+        }
+      }
+
+      console.warn('⚠️ 在 Windows 上找不到 FFmpeg，音訊轉換功能將無法使用');
+    }
+  }
+
   async convertToLinear16Wav(options: ConvertAudioOptions): Promise<ConvertAudioResult> {
     const { inputPath } = options;
     if (!fs.existsSync(inputPath)) {
@@ -64,30 +110,52 @@ export class AudioConverterService {
     await fs.promises.mkdir(outputDir, { recursive: true });
 
     return new Promise<ConvertAudioResult>((resolve) => {
-      ffmpeg(inputPath)
-        .audioCodec('pcm_s16le')
-        .audioChannels(1)
-        .audioFrequency(sampleRate)
-        .format('wav')
-        .on('end', async () => {
-          try {
-            const duration = await this.getDurationSeconds(outputPath);
-            resolve({ success: true, outputPath, durationSeconds: duration });
-          } catch (error) {
-            resolve({
-              success: true,
-              outputPath,
-              error: error instanceof Error ? error.message : 'Failed to read duration'
-            });
-          }
-        })
-        .on('error', (error) => {
+      try {
+        ffmpeg(inputPath)
+          .audioCodec('pcm_s16le')
+          .audioChannels(1)
+          .audioFrequency(sampleRate)
+          .format('wav')
+          .on('end', async () => {
+            try {
+              const duration = await this.getDurationSeconds(outputPath);
+              resolve({ success: true, outputPath, durationSeconds: duration });
+            } catch (error) {
+              resolve({
+                success: true,
+                outputPath,
+                error: error instanceof Error ? error.message : 'Failed to read duration'
+              });
+            }
+          })
+          .on('error', (error) => {
+            // 在 Windows 上，如果 ffmpeg 不存在，提供更好的錯誤訊息
+            if (process.platform === 'win32' && error.message.includes('Cannot find ffmpeg')) {
+              resolve({
+                success: false,
+                error: 'FFmpeg 未安裝或未找到。請確保 FFmpeg 已安裝在系統 PATH 中，或聯繫開發者獲取支援。'
+              });
+            } else {
+              resolve({
+                success: false,
+                error: error instanceof Error ? error.message : 'Audio conversion failed'
+              });
+            }
+          })
+          .save(outputPath);
+      } catch (error) {
+        if (process.platform === 'win32' && error instanceof Error && error.message.includes('ffmpeg')) {
           resolve({
             success: false,
-            error: error instanceof Error ? error.message : 'Audio conversion failed'
+            error: 'FFmpeg 未安裝或未找到。請確保 FFmpeg 已安裝在系統 PATH 中，或聯繫開發者獲取支援。'
           });
-        })
-        .save(outputPath);
+        } else {
+          resolve({
+            success: false,
+            error: error instanceof Error ? error.message : 'Audio conversion initialization failed'
+          });
+        }
+      }
     });
   }
 
