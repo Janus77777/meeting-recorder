@@ -1447,10 +1447,10 @@ const App: React.FC = () => {
     try {
       console.log('開始處理上傳檔案:', file.name, file.type, file.size);
       
-      // 檢查檔案大小 (限制 50MB)
-      const maxSize = 50 * 1024 * 1024; // 50MB
+      // 檢查檔案大小（與 validateAudioFile 保持一致，限制 500MB）
+      const maxSize = 500 * 1024 * 1024; // 500MB
       if (file.size > maxSize) {
-        alert('檔案太大！請選擇小於 50MB 的音訊檔案。');
+        alert('檔案太大！請選擇小於 500MB 的音訊檔案。');
         return;
       }
       
