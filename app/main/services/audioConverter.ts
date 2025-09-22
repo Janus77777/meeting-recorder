@@ -3,6 +3,46 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { randomUUID } from 'crypto';
 import ffmpeg from 'fluent-ffmpeg';
+import ffmpegStaticPath from 'ffmpeg-static';
+import ffprobe from 'ffprobe-static';
+
+const resolveBundledBinary = (candidate?: string | null, fallbackModule?: 'ffmpeg-static' | 'ffprobe-static'): string | undefined => {
+  if (!candidate) {
+    return undefined;
+  }
+
+  const asarAdjusted = candidate.replace(/app\.asar(?!\.unpacked)/g, 'app.asar.unpacked');
+  if (fs.existsSync(asarAdjusted)) {
+    return asarAdjusted;
+  }
+
+  if (app.isPackaged && fallbackModule) {
+    const binaryName = path.basename(candidate);
+    const moduleDir = path.join(process.resourcesPath, 'app.asar.unpacked', 'node_modules', fallbackModule);
+    const directCandidate = path.join(moduleDir, binaryName);
+    if (fs.existsSync(directCandidate)) {
+      return directCandidate;
+    }
+
+    // ffprobe-static 將檔案放在 bin/<platform>/<arch>
+    const binCandidate = path.join(moduleDir, 'bin', process.platform, process.arch, binaryName);
+    if (fs.existsSync(binCandidate)) {
+      return binCandidate;
+    }
+  }
+
+  return fs.existsSync(candidate) ? candidate : undefined;
+};
+
+const resolvedFfmpegPath = resolveBundledBinary(ffmpegStaticPath, 'ffmpeg-static');
+if (resolvedFfmpegPath) {
+  ffmpeg.setFfmpegPath(resolvedFfmpegPath);
+}
+
+const resolvedFfprobePath = resolveBundledBinary((ffprobe as { path?: string })?.path, 'ffprobe-static');
+if (resolvedFfprobePath) {
+  ffmpeg.setFfprobePath(resolvedFfprobePath);
+}
 
 export interface ConvertAudioOptions {
   /** 來源音訊檔案路徑 */
