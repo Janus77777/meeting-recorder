@@ -30,16 +30,31 @@ class APIClient {
       ...options.headers
     };
 
-    const response = await fetch(url, {
-      ...options,
-      headers
-    });
+    try {
+      // Create AbortController for timeout
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 30000);
 
-    if (!response.ok) {
-      throw new Error(`API Error: ${response.status} ${response.statusText}`);
+      const response = await fetch(url, {
+        ...options,
+        headers,
+        signal: controller.signal,
+      });
+
+      clearTimeout(timeoutId);
+
+      if (!response.ok) {
+        throw new Error(`API Error: ${response.status} ${response.statusText}`);
+      }
+
+      return response.json();
+    } catch (error) {
+      if (error instanceof Error) {
+        console.error('API Request failed:', error.message, 'URL:', url);
+        throw error;
+      }
+      throw new Error('Unknown API error');
     }
-
-    return response.json();
   }
 
   // API Methods

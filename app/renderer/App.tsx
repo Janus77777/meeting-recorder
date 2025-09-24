@@ -962,12 +962,16 @@ const App: React.FC = () => {
       if (mode === 'hybrid_stt') {
         console.log('使用 Google STT + Gemini 混合模式進行轉錄');
         await startHybridSTTTranscription(audioBlob, filename, jobId, originalChunks, durationSeconds);
-      } else if (settings.useGemini && settings.geminiApiKey) {
+      } else if (settings.useGemini) {
+        if (!settings.geminiApiKey) {
+          alert('請先在設定中配置 Gemini API Key 才能使用轉錄功能');
+          return;
+        }
         console.log('使用 Google Gemini API 進行轉錄');
         await startGeminiTranscription(audioBlob, filename, jobId, originalChunks, durationSeconds);
       } else {
-        console.log('使用原有 API 進行轉錄');
-        await startOriginalApiTranscription(audioBlob, filename, jobId, originalChunks, durationSeconds);
+        alert('請先在設定中配置轉錄服務才能使用此功能');
+        return;
       }
       
     } catch (error) {
