@@ -75,19 +75,26 @@
       "package.json",
       "node_modules/**/*"
     ],
-    "extraResources": [
-      {
-        "from": "assets",
-        "to": "assets",
-        "filter": [
-          "**/*"
-        ]
-      },
-      {
-        "from": "resources/credentials/google-stt.json",
-        "to": "credentials/google-stt.json",
-        "filter": [
-          "**/*"
+  "extraResources": [
+    {
+      "from": "assets",
+      "to": "assets",
+      "filter": [
+        "**/*"
+      ]
+    },
+    {
+      "from": "resources/ffmpeg",
+      "to": "ffmpeg",
+      "filter": [
+        "**/*"
+      ]
+    },
+    {
+      "from": "resources/credentials/google-stt.json",
+      "to": "credentials/google-stt.json",
+      "filter": [
+        "**/*"
         ]
       }
     ],
