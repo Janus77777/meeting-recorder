@@ -109,20 +109,38 @@ export class GoogleCloudSTTService {
         hasFeature = true;
       }
 
+      // 既定開啟：自動標點
+      try {
+        (result as any).enableAutomaticPunctuation = true;
+        hasFeature = true;
+      } catch {}
+
+      // 注意：Diarization 僅支援單聲道；若開啟 diarization，禁止多聲道分離
+      if (!diarizationConfig) {
+        try {
+          (result as any).multiChannelMode = (protos.google.cloud.speech.v2 as any).RecognitionFeatures.MultiChannelMode.SEPARATE_RECOGNITION_PER_CHANNEL;
+          hasFeature = true;
+        } catch {}
+      }
+
       return hasFeature ? result : undefined;
     })();
 
     const recognitionConfig: protos.google.cloud.speech.v2.IRecognitionConfig = {};
 
-    if (!isChirpRecognizer) {
-      recognitionConfig.autoDecodingConfig = {};
-      if (options.languageCode) {
-        recognitionConfig.languageCodes = [options.languageCode];
-      }
+    // 對 chirp_3 也允許帶入語言代碼（例如 cmn-Hans-CN）
+    recognitionConfig.autoDecodingConfig = {};
+    if (options.languageCode) {
+      recognitionConfig.languageCodes = [options.languageCode];
     }
 
     if (features) {
       recognitionConfig.features = features;
+    }
+
+    // 明確指定模型，避免使用 recognizer 預設模型導致不支援的欄位組合（例如 latest_long + diarization）
+    if (this.config?.model) {
+      recognitionConfig.model = this.config.model;
     }
 
     const request: RecognizeRequest = {
@@ -140,7 +158,30 @@ export class GoogleCloudSTTService {
       enableWordTimeOffsets: !!features?.enableWordTimeOffsets
     });
 
-    const [response] = await this.client.recognize(request);
+    let response: RecognizeResponse;
+    try {
+      const [res] = await this.client.recognize(request);
+      response = res;
+    } catch (err: any) {
+      const msg = (err && err.message) ? String(err.message) : '';
+      const code = (err && (err.code !== undefined)) ? Number(err.code) : undefined;
+      const recognizerNotFound = msg.includes('Unable to find Recognizer') || msg.includes('NOT_FOUND');
+      if (recognizerNotFound || code === 5) {
+        // 自動後備：若指定的 recognizer 不存在，改用預設 '_' 再嘗試一次
+        const fallback: RecognizeRequest = {
+          ...request,
+          recognizer: `projects/${this.config.projectId}/locations/${this.config.location}/recognizers/_`
+        };
+        console.warn('[GoogleSTT] 指定的 recognizer 不存在，改用預設 _ 重試一次:', {
+          original: request.recognizer,
+          fallback: fallback.recognizer
+        });
+        const [res2] = await this.client.recognize(fallback);
+        response = res2;
+      } else {
+        throw err;
+      }
+    }
     if (process.env.NODE_ENV === 'development') {
       console.log('[GoogleSTT] Raw response results summary',
         (response.results || []).map((result, idx) => ({

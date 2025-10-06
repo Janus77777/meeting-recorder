@@ -88,6 +88,10 @@ export interface MeetingJob {
   transcript?: string;
   transcriptSegments?: TranscriptSegment[];
   summary?: string;
+  // 由模型從逐字稿分段推得的大綱時間軸（供摘要頁點擊跳轉使用）
+  timelineItems?: Array<{ time?: string; timeRange?: string; item: string; desc?: string }>;
+  progressMessage?: string;
+  errorMessage?: string;
 }
 
 // 內部領域詞彙表項目
@@ -119,6 +123,7 @@ export interface AppSettings {
   googleCloudSTT?: GoogleCloudSTTSettings;
   // 自訂提示詞設定
   customTranscriptPrompt?: string;
+  customTranscriptCleanupPrompt?: string;
   customSummaryPrompt?: string;
   // 內部領域詞彙表
   vocabularyList?: VocabularyItem[];
@@ -174,6 +179,7 @@ export interface GoogleCloudSTTSettings {
   languageCode?: string;
   model?: string;
   enableSpeakerDiarization?: boolean;
+  enableWordTimeOffsets?: boolean;
   minSpeakerCount?: number;
   maxSpeakerCount?: number;
 }

@@ -172,6 +172,47 @@ export function setupRecordingIPC(): void {
     }
   });
 
+  // Copy file on disk (renderer -> main), ensures destination directory exists
+  ipcMain.handle('recording:copyFile', async (_event, srcPath: string, destPath: string) => {
+    try {
+      const dir = path.dirname(destPath);
+      if (!fs.existsSync(srcPath)) {
+        throw new Error('Source file does not exist');
+      }
+      if (!fs.existsSync(dir)) {
+        fs.mkdirSync(dir, { recursive: true });
+      }
+      fs.copyFileSync(srcPath, destPath);
+      return { success: true, filePath: destPath };
+    } catch (error) {
+      console.error('Failed to copy file:', error);
+      return { success: false, error: error instanceof Error ? error.message : 'Unknown error' };
+    }
+  });
+
+  // Check file exists
+  ipcMain.handle('recording:fileExists', async (_event, filePath: string) => {
+    try {
+      return { success: true, exists: fs.existsSync(filePath) };
+    } catch (error) {
+      return { success: false, error: error instanceof Error ? error.message : 'Unknown error' };
+    }
+  });
+
+  // Read file as buffer (ArrayBuffer for renderer)
+  ipcMain.handle('recording:readFile', async (_event, filePath: string) => {
+    try {
+      if (!fs.existsSync(filePath)) {
+        throw new Error('File does not exist');
+      }
+      const buf = fs.readFileSync(filePath);
+      const ab = buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength);
+      return { success: true, buffer: ab, size: buf.length };
+    } catch (error) {
+      return { success: false, error: error instanceof Error ? error.message : 'Unknown error' };
+    }
+  });
+
   // Clean up temporary files
   ipcMain.handle('recording:cleanup', async (event, filePaths: string[]) => {
     try {

@@ -50,6 +50,33 @@ export interface ExtractSegmentResult {
  * 目前用途：將錄音結果 (WebM/Opus) 轉為 LINEAR16 WAV，供 Google STT 使用。
  */
 export class AudioConverterService {
+  constructor() {
+    this.initializeFfmpeg();
+  }
+
+  private initializeFfmpeg(): void {
+    if (process.platform === 'win32') {
+      try {
+        const possiblePaths = [
+          path.join(process.resourcesPath, 'ffmpeg', 'win32-x64', 'ffmpeg.exe'),
+          path.join(__dirname, '..', '..', '..', 'resources', 'ffmpeg', 'win32-x64', 'ffmpeg.exe'),
+          'ffmpeg'
+        ];
+        for (const pth of possiblePaths) {
+          if (pth !== 'ffmpeg' && fs.existsSync(pth)) {
+            ffmpeg.setFfmpegPath(pth);
+            break;
+          }
+          if (pth === 'ffmpeg') {
+            try { ffmpeg.setFfmpegPath('ffmpeg'); } catch {}
+          }
+        }
+      } catch (e) {
+        console.warn('FFmpeg 路徑初始化失敗（Windows）:', e);
+      }
+    }
+  }
+
   async convertToLinear16Wav(options: ConvertAudioOptions): Promise<ConvertAudioResult> {
     const { inputPath } = options;
     if (!fs.existsSync(inputPath)) {

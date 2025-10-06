@@ -80,8 +80,87 @@ export const requestSystemAudioStream = async (
   options: SystemAudioCaptureOptions = {}
 ): Promise<SystemAudioCaptureResult> => {
   const platform = options.platform ?? 'unknown';
-  const preferDisplayCapture = options.preferDisplayCapture ?? platform === 'darwin';
+  const preferDisplayCapture = options.preferDisplayCapture ?? (platform === 'darwin' || platform === 'win32');
   const warnings: string[] = [];
+
+  const attemptDesktopCapture = async (sourceId: string) => {
+    const constraints: any = {
+      audio: {
+        mandatory: {
+          chromeMediaSource: 'desktop',
+          chromeMediaSourceId: sourceId
+        }
+      },
+      video: {
+        mandatory: {
+          chromeMediaSource: 'desktop',
+          chromeMediaSourceId: sourceId,
+          maxWidth: 1,
+          maxHeight: 1,
+          maxFrameRate: 1
+        }
+      }
+    };
+
+    log(options.logger, '🖥️ 嘗試透過桌面來源擷取系統聲音', sourceId);
+
+    const desktopStream = await navigator.mediaDevices.getUserMedia(constraints);
+    const audioTracks = desktopStream.getAudioTracks();
+
+    if (audioTracks.length === 0) {
+      desktopStream.getTracks().forEach(track => track.stop());
+      throw new Error('桌面來源未提供音訊軌道');
+    }
+
+    desktopStream.getVideoTracks().forEach(track => track.stop());
+    const audioStream = new MediaStream();
+    audioTracks.forEach(track => audioStream.addTrack(track));
+
+    return audioStream;
+  };
+
+  if (typeof window !== 'undefined' && (window as any)?.electronAPI?.getAudioSources) {
+    try {
+      const sources = await (window as any).electronAPI.getAudioSources();
+      const candidateSources: Array<{ id: string; name: string }> = Array.isArray(sources) ? sources : [];
+
+      const preferredOrder = candidateSources.filter(source => {
+        if (!source?.id) return false;
+        if (platform === 'darwin') {
+          return source.id.startsWith('screen:');
+        }
+        return source.id.startsWith('screen:') || source.id.startsWith('window:');
+      });
+
+      for (const source of [...preferredOrder, ...candidateSources]) {
+        try {
+          if (!source?.id) {
+            continue;
+          }
+          const audioStream = await attemptDesktopCapture(source.id);
+          return {
+            stream: audioStream,
+            source: 'display',
+            warnings
+          };
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+      if (message?.toLowerCase().includes('denied') || message?.toLowerCase().includes('not allowed')) {
+        warnings.push('請確認已在系統偏好設定中授權螢幕錄製/麥克風權限給 Meeting Recorder');
+      } else if (message?.toLowerCase().includes('not supported')) {
+        warnings.push('目前環境不支援從桌面來源擷取音訊（可能缺少螢幕錄製權限）');
+      } else {
+        warnings.push(`無法透過來源 ${source?.name ?? source?.id} 擷取：${message}`);
+      }
+      log(options.logger, '⚠️ 桌面來源擷取失敗', { source, error });
+        }
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      warnings.push(`無法取得桌面來源列表：${message}`);
+      log(options.logger, '❌ 無法取得桌面來源列表', error);
+    }
+  }
 
   // Try display capture (works on macOS and modern Windows builds)
   if (preferDisplayCapture && navigator.mediaDevices?.getDisplayMedia) {
@@ -89,17 +168,8 @@ export const requestSystemAudioStream = async (
       log(options.logger, '🖥️ 嘗試透過螢幕錄製取得系統聲音');
       const displayConstraints: DisplayMediaStreamOptions = {
         audio: true,
-        video: {
-          width: 1,
-          height: 1,
-          frameRate: 1
-        }
+        video: platform === 'darwin' ? { width: 1, height: 1, frameRate: 1 } : false
       };
-
-      // On Windows we prefer audio only, but some platforms require video flag
-      if (platform !== 'darwin') {
-        displayConstraints.video = false;
-      }
 
       const displayStream = await navigator.mediaDevices.getDisplayMedia(displayConstraints);
       const audioTracks = displayStream.getAudioTracks();

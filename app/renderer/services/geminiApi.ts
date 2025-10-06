@@ -1,4 +1,8 @@
 import { AppSettings } from '@shared/types';
+import {
+  DEFAULT_GEMINI_TRANSCRIPT_PROMPT,
+  DEFAULT_TRANSCRIPT_CLEANUP_PROMPT
+} from '@shared/defaultPrompts';
 
 // Gemini API 類型定義
 interface GeminiFileUploadResponse {
@@ -479,8 +483,8 @@ class GeminiAPIClient {
     }
   }
 
-  // 等待檔案處理完成
-  private async waitForFileProcessing(fileInfo: GeminiFileUploadResponse, maxAttempts: number = 10): Promise<GeminiFileUploadResponse> {
+  // 等待檔案處理完成 (影片檔案需要更長時間)
+  private async waitForFileProcessing(fileInfo: GeminiFileUploadResponse, maxAttempts: number = 180): Promise<GeminiFileUploadResponse> {
     let attempts = 0;
     
     console.log('檔案資訊:', fileInfo);
@@ -496,6 +500,9 @@ class GeminiAPIClient {
       });
 
       if (!response.ok) {
+        if (response.status === 500) {
+          throw new Error(`Google API 伺服器錯誤 (${response.status})。可能原因：檔案太大或格式不支援。建議嘗試較小的檔案或稍後重試。`);
+        }
         throw new Error(`檢查檔案狀態失敗: ${response.status}`);
       }
 
@@ -709,27 +716,7 @@ class GeminiAPIClient {
     // 構建參與者名單提示
     let participantsPrompt = '';
 
-    const defaultPrompt = `請使用 Google Cloud Speech-to-Text v2 的 USM（Chirp/Chirp 2）模型對本音訊做語音轉文字，啟用說話者分段（speaker diarization）與字詞級時間戳（word time offsets）；僅輸出一個 <pre> 區塊，不要任何前後解說或 JSON。
-
-輸出規格：
-1. 第 1 行輸出「# Legend: 」後接目前可判斷的映射（例：Speaker 1=阿明, Speaker 2=小美）。
-2. 其後每段對話一行，格式：「[姓名|Speaker N]: 文字」。
-3. 姓名推斷規則：
-   - 遇到「自我介紹」語句（如「我是/我叫/我的名字是/This is/I'm + 名字」）時，將當前 Speaker N 映射為該姓名。
-   - 若對話出現點名呼喚（如「阿明你看…」）且緊接的回覆為第一人稱陳述，將該回覆的 Speaker N 映射為被呼喚的姓名。
-   - 持續沿用已建立的映射，除非出現明確更正（如「不是我，是小美說的」）。
-   - 若同名多位，請使用「姓名(1)、姓名(2)」區分。
-   - 若信心不足，輸出「Speaker N (可能是姓名)」。
-   - 不得憑空創造未在音訊中明示或可合理推斷的姓名；若無線索則保留「Speaker N」。
-4. 長句請在語義自然處換行為多段行輸出避免過長。${participantsPrompt}
-
-必要設定（由系統/連接器帶入即可）：
-- model=chirp 或 chirp_2
-- enable_speaker_diarization=true
-- enable_word_time_offsets=true
-- language=zh-TW
-- min_speaker_count=1
-- max_speaker_count=8`;
+    const defaultPrompt = DEFAULT_GEMINI_TRANSCRIPT_PROMPT;
 
     // 構建最終提示詞，包含詞彙表
     let finalPrompt = customPrompt || defaultPrompt;
@@ -810,6 +797,64 @@ class GeminiAPIClient {
     }, '轉錄');
   }
 
+  // 使用 Gemini 對 Google STT 的結果進行逐字稿整稿與格式化
+  async cleanupTranscript(transcriptText: string, customPrompt?: string): Promise<string> {
+    const basePrompt = customPrompt && customPrompt.trim().length > 0
+      ? customPrompt
+      : DEFAULT_TRANSCRIPT_CLEANUP_PROMPT;
+
+    const fullPrompt = `${basePrompt}\n\n原始逐字稿：\n${transcriptText}`;
+
+    const rawOutput = await this.executeWithFallback(async (model: string) => {
+      const generateUrl = `${this.baseURL}/models/${model}:generateContent?key=${this.apiKey}`;
+
+      const requestBody = {
+        contents: [
+          {
+            parts: [
+              {
+                text: fullPrompt
+              }
+            ]
+          }
+        ],
+        generationConfig: {
+          temperature: 0.1,
+          topK: 40,
+          topP: 0.9,
+          maxOutputTokens: 8192,
+          responseMimeType: 'text/plain'
+        }
+      };
+
+      return this.retryWithExponentialBackoff(async () => {
+        console.log(`向 Gemini 發送逐字稿修正請求... (模型: ${model})`);
+
+        const response = await fetch(generateUrl, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify(requestBody)
+        });
+
+        if (!response.ok) {
+          const errorText = await response.text();
+          console.error(`Gemini 逐字稿修正請求失敗 (模型: ${model}):`, response.status, errorText);
+          throw new Error(`Gemini API 請求失敗: ${response.status}`);
+        }
+
+        const result: GeminiGenerateContentResponse = await response.json();
+        console.log(`Gemini 逐字稿修正回應 (模型: ${model}):`, result);
+
+        const cleanedText = this.extractTextFromResponse(result, '逐字稿修正');
+        return cleanedText;
+      });
+    }, '逐字稿修正');
+
+    return this.stripPreformattedBlock(rawOutput);
+  }
+
   // 生成自訂摘要 - 支援模型 Fallback
   async generateCustomSummary(transcriptText: string, customPrompt: string): Promise<string> {
     const fullPrompt = `以下是會議的轉錄內容：
@@ -871,21 +916,30 @@ ${customPrompt}`;
   }
 
   async generateStructuredSummaryFromTranscript(transcriptText: string, customPrompt?: string) {
-    const defaultPrompt = `請閱讀以下會議逐字稿，並以 Markdown 產出結構化的會議摘要。請依照下列格式輸出，若某區段沒有內容請輸出「- 無」。
+    const defaultPrompt = `請閱讀以下會議逐字稿，並以 Markdown 產出結構化的會議摘要。格式與標記必須嚴格遵守；若某區段沒有內容請輸出「- 無」。
 
 # 會議摘要
 ## 概要
-- …
-## 主要重點
-- …
-## 決議與結論
-- …
-## 待辦事項
-- 負責人：…，事項：…，期限：…
-## 其他備註
-- …
+- 用 4–8 句完整句子總結重點，避免過長。
 
-請勿輸出 JSON，僅輸出上述 Markdown 內容。`;
+## 主要重點
+- 每條「行首必須是且僅能是」下列三種之一："[高] ", "[中] ", "[低] "（半形方括號＋一個空格），禁止使用其他括號或符號。
+- 依影響面與緊迫性自行判斷高/中/低；無法判定時用「[中]」。
+- 至少 6 條，以「高 → 中 → 低」排序；內容避免重複與贅字。
+
+## 決議與結論
+- 精煉列點，描述清楚，不要太長。
+
+## 待辦事項
+- 每條包含：事項、負責人、期限、狀態（待處理/進行中/完成）。
+- 推薦格式："事項：…｜負責人：…｜期限：MM/DD｜狀態：進行中"（請使用半形直線｜作為分隔）。
+
+## 其他備註
+- 其他重要補充。
+
+注意事項：
+- 僅輸出上述 Markdown，不要輸出 JSON 或額外說明。
+- 分節標題必須為「概要／主要重點／決議與結論／待辦事項／其他備註」。`;
 
     const fullPrompt = `${customPrompt || defaultPrompt}
 
@@ -953,16 +1007,111 @@ ${transcriptText}`;
     }, '摘要');
   }
 
+  // 產生「標題式大綱 + 時間軸」：
+  // 輸入為已整理的逐字稿分段（含數字秒數 start/end 與文字 text），輸出 JSON 陣列：
+  // [{ "time": "MM:SS", "item": "段落標題", "desc": "一句話摘要" }, ...]
+  async generateTimelineOutline(segments: Array<{ start: number | string; end?: number | string; text: string }>) {
+    // 將分段壓縮為帶時間標記的純文字，避免超長
+    const toTs = (v?: number | string) => {
+      if (typeof v === 'number') {
+        const mm = Math.floor(v / 60);
+        const ss = Math.floor(v % 60);
+        return `${String(mm).padStart(2, '0')}:${String(ss).padStart(2, '0')}`;
+      }
+      if (!v) return '00:00';
+      return String(v);
+    };
+    const MAX_ITEMS = 180; // 安全上限
+    const slim = segments.slice(0, MAX_ITEMS).map(s => `[${toTs(s.start)}] ${s.text?.slice(0, 240)}`);
+
+    const prompt = `你是一個專業的逐字稿編輯，請依下列帶時間標記的對話分段，產生「可點擊的時間軸」的標題式大綱：
+
+要求：
+1) 以重大語義變化為界，自行合併鄰近句，產出 6–12 個節點；
+2) 每個節點輸出 JSON 物件：{"time":"MM:SS","item":"標題","desc":"一句話摘要"}；time 請取該段落起始時間；
+3) 只輸出 JSON 陣列，不要任何說明文字；
+
+資料：\n${slim.join('\n')}`;
+
+    return this.executeWithFallback(async (model: string) => {
+      const generateUrl = `${this.baseURL}/models/${model}:generateContent?key=${this.apiKey}`;
+      const requestBody = {
+        contents: [
+          { parts: [{ text: prompt }] }
+        ],
+        generationConfig: {
+          temperature: 0.2,
+          topK: 40,
+          topP: 0.9,
+          maxOutputTokens: 2048,
+          responseMimeType: 'application/json'
+        }
+      };
+
+      const response = await fetch(generateUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(requestBody)
+      });
+      if (!response.ok) {
+        const errorText = await response.text();
+        throw new Error(`Gemini 時間軸請求失敗: ${response.status} ${errorText}`);
+      }
+      const result = await response.json();
+      const text = this.extractTextFromResponse(result, '時間軸');
+      try {
+        const arr = JSON.parse(text);
+        if (Array.isArray(arr)) return arr;
+      } catch {}
+      // 後備：嘗試在文字中擷取第一個 JSON 陣列
+      const m = text.match(/\[[\s\S]*\]/);
+      if (m) {
+        try { const arr = JSON.parse(m[0]); if (Array.isArray(arr)) return arr; } catch {}
+      }
+      return [];
+    }, '時間軸');
+  }
+
+  private stripPreformattedBlock(text: string): string {
+    if (!text) {
+      return '';
+    }
+
+    const match = text.match(/<pre[^>]*>([\s\S]*?)<\/pre>/i);
+    const content = match ? match[1] : text;
+
+    const unescaped = content
+      .replace(/<br\s*\/?\>/gi, '\n')
+      .replace(/&lt;/g, '<')
+      .replace(/&gt;/g, '>')
+      .replace(/&amp;/g, '&');
+
+    const withoutCodeFence = unescaped
+      .replace(/^```[a-z0-9]*\s*/i, '')
+      .replace(/```$/i, '');
+
+    return withoutCodeFence.trim();
+  }
+
   // 解析 Gemini 回應（支援 JSON 和純文字格式）
   parseTranscriptionResult(responseText: string) {
+    const strippedResponse = this.stripPreformattedBlock(responseText);
+    const sanitizedForJson = strippedResponse
+      .replace(/^```(?:json|html)?\s*/i, '')
+      .replace(/```\s*$/i, '')
+      .trim();
+
     try {
       // 嘗試解析為 JSON（向後相容性）
-      const parsed = JSON.parse(responseText);
+      const parsed = JSON.parse(sanitizedForJson);
 
       return {
         transcript: {
           segments: parsed.transcript?.segments || [],
-          fullText: parsed.transcript?.fullText || parsed.transcript?.segments?.map((s: any) => s.text).join('\n') || '',
+          fullText:
+            parsed.transcript?.fullText ||
+            parsed.transcript?.segments?.map((s: any) => s.text).join('\n') ||
+            strippedResponse,
           corrections: parsed.transcript?.corrections || []
         },
         summary: {
@@ -978,7 +1127,7 @@ ${transcriptText}`;
       console.log('處理純文字格式轉錄結果');
 
       // 處理純文字格式，正確解析換行
-      let cleanText = responseText.trim();
+      let cleanText = sanitizedForJson || strippedResponse.trim();
 
       // 將 \n 轉換為實際換行，並清理格式
       cleanText = cleanText

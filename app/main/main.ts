@@ -1,4 +1,4 @@
-import { app, BrowserWindow, ipcMain, Menu, dialog } from 'electron';
+import { app, BrowserWindow, ipcMain, Menu, dialog, shell, systemPreferences } from 'electron';
 import * as path from 'path';
 import { autoUpdater } from 'electron-updater';
 import { setupRecordingIPC } from './ipc/recording';
@@ -64,7 +64,8 @@ class MeetingRecorderApp {
         preload: path.join(__dirname, 'preload.js'),
         webSecurity: false, // 允許外部 API 請求
         allowRunningInsecureContent: true,
-        experimentalFeatures: true
+        experimentalFeatures: true,
+        enableBlinkFeatures: 'ClipboardAPI'
       },
       show: false, // Don't show until ready
       titleBarStyle: 'default',
@@ -72,19 +73,21 @@ class MeetingRecorderApp {
     });
 
     // Handle permissions for display-capture (needed for system audio)
-    this.mainWindow.webContents.session.setPermissionRequestHandler((webContents, permission, callback) => {
+    this.mainWindow.webContents.session.setPermissionRequestHandler((_webContents, permission, callback) => {
+      const permName = String(permission);
       console.log('Permission request:', permission);
-      if (permission === 'media') {
-        callback(true); // Allow media permissions for audio/video capture
+      if (permName === 'media' || permName === 'display-capture') {
+        callback(true);
       } else {
         callback(false);
       }
     });
 
     // 設置音頻捕捉權限
-    this.mainWindow.webContents.session.setPermissionCheckHandler((webContents, permission, requestingOrigin, details) => {
-      console.log('Permission check:', permission, 'from:', requestingOrigin);
-      return permission === 'media';
+    this.mainWindow.webContents.session.setPermissionCheckHandler((_webContents, permission) => {
+      const permName = String(permission);
+      console.log('Permission check:', permission);
+      return permName === 'media' || permName === 'display-capture';
     });
 
     // Load the app
@@ -174,6 +177,31 @@ class MeetingRecorderApp {
       }
     });
 
+    // File open dialog for re-linking source audio
+    ipcMain.handle('dialog:openFile', async () => {
+      if (!this.mainWindow) return { canceled: true };
+      const result = await dialog.showOpenDialog(this.mainWindow, {
+        title: '選擇原始音訊或影片檔案',
+        properties: ['openFile'],
+        filters: [
+          { name: 'Media', extensions: ['wav','mp3','m4a','aac','flac','ogg','opus','webm','mp4','mov','avi','mkv'] }
+        ]
+      });
+      if (result.canceled || !result.filePaths?.[0]) return { canceled: true };
+      return { canceled: false, filePath: result.filePaths[0] };
+    });
+
+    // 選擇目錄（錄音儲存路徑）
+    ipcMain.handle('dialog:openDirectory', async () => {
+      if (!this.mainWindow) return { canceled: true };
+      const result = await dialog.showOpenDialog(this.mainWindow, {
+        title: '選擇錄音儲存目錄',
+        properties: ['openDirectory', 'createDirectory']
+      });
+      if (result.canceled || !result.filePaths?.[0]) return { canceled: true };
+      return { canceled: false, directoryPath: result.filePaths[0] };
+    });
+
     // Desktop capturer for system audio
     ipcMain.handle('desktopCapturer:getAudioSources', async () => {
       try {
@@ -189,6 +217,78 @@ class MeetingRecorderApp {
       } catch (error) {
         console.error('❌ 獲取音訊源失敗:', error);
         throw error;
+      }
+    });
+
+    ipcMain.handle('permissions:open', async (_event, target: 'microphone' | 'screen') => {
+      try {
+        if (process.platform !== 'darwin') {
+          return false;
+        }
+
+        const url = target === 'microphone'
+          ? 'x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone'
+          : 'x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture';
+
+        await shell.openExternal(url);
+        return true;
+      } catch (error) {
+        console.error('開啟系統偏好設定失敗:', error);
+        return false;
+      }
+    });
+
+    ipcMain.handle('permissions:getMediaStatus', async (_event, media: 'microphone') => {
+      try {
+        if (process.platform !== 'darwin') {
+          return 'unsupported';
+        }
+
+        if (typeof systemPreferences.getMediaAccessStatus !== 'function') {
+          return 'unknown';
+        }
+
+        const status = systemPreferences.getMediaAccessStatus(media);
+        console.log(`[Permissions] systemPreferences.getMediaAccessStatus(${media}) ->`, status);
+        return status;
+      } catch (error) {
+        console.error('取得媒體授權狀態失敗:', error);
+        return 'error';
+      }
+    });
+
+    ipcMain.handle('permissions:requestMediaAccess', async (_event, media: 'microphone') => {
+      try {
+        if (process.platform !== 'darwin') {
+          return false;
+        }
+
+        if (typeof systemPreferences.askForMediaAccess !== 'function') {
+          return false;
+        }
+
+        const status = systemPreferences.getMediaAccessStatus(media);
+        console.log(`[Permissions] Current ${media} status:`, status);
+        const granted = await systemPreferences.askForMediaAccess(media);
+        console.log(`[Permissions] askForMediaAccess(${media}) result:`, granted);
+        const afterStatus = systemPreferences.getMediaAccessStatus(media);
+        console.log(`[Permissions] ${media} status after request:`, afterStatus);
+        return granted;
+      } catch (error) {
+        console.error('請求媒體權限失敗:', error);
+        return false;
+      }
+    });
+
+    // Clipboard handler
+    ipcMain.handle('clipboard:writeText', async (event, text: string) => {
+      try {
+        const { clipboard } = require('electron');
+        clipboard.writeText(text);
+        return { success: true };
+      } catch (error) {
+        console.error('Clipboard write failed:', error);
+        return { success: false, error: (error as Error).message };
       }
     });
 
@@ -210,6 +310,8 @@ class MeetingRecorderApp {
 
   private setupAutoUpdater(): void {
     // 配置更新伺服器
+    // 關閉自動下載，改為詢問使用者
+    try { (autoUpdater as any).autoDownload = false; } catch {}
     autoUpdater.setFeedURL({
       provider: 'github',
       owner: 'Janus77777',
@@ -230,6 +332,29 @@ class MeetingRecorderApp {
         this.mainWindow.webContents.send('update-available', {
           version: info.version,
           releaseNotes: info.releaseNotes
+        });
+
+        // 立即提示是否下載更新
+        dialog.showMessageBox(this.mainWindow, {
+          type: 'info',
+          title: '有可用更新',
+          message: `發現新版本 v${info.version}`,
+          detail: '是否立即下載更新？下載完成後可選擇立即安裝。',
+          buttons: ['稍後', '立即下載'],
+          defaultId: 1,
+          cancelId: 0
+        }).then((res) => {
+          if (res.response === 1) {
+            autoUpdater.downloadUpdate().catch((err) => {
+              console.error('下載更新失敗:', err);
+              this.mainWindow?.webContents.send('update-progress', {
+                percent: 0,
+                transferred: 0,
+                total: 0,
+                bytesPerSecond: 0
+              });
+            });
+          }
         });
       }
     });
@@ -283,9 +408,9 @@ class MeetingRecorderApp {
 
     // 在開發環境不檢查更新
     if (process.env.NODE_ENV !== 'development') {
-      // 啟動後5秒檢查更新
+      // 啟動後 5 秒檢查更新（不自動下載）
       setTimeout(() => {
-        autoUpdater.checkForUpdatesAndNotify();
+        autoUpdater.checkForUpdates().catch(err => console.error('檢查更新失敗:', err));
       }, 5000);
     }
   }

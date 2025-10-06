@@ -22,7 +22,7 @@ export const ResultPage: React.FC = () => {
   // Redirect if no current job
   useEffect(() => {
     if (!currentJob) {
-      setCurrentPage('jobs');
+      setCurrentPage('record');
     }
   }, [currentJob, setCurrentPage]);
 
@@ -107,7 +107,7 @@ export const ResultPage: React.FC = () => {
           </svg>
           <p>請先選擇一個會議任務</p>
           <button
-            onClick={() => setCurrentPage('jobs')}
+            onClick={() => setCurrentPage('record')}
             className="mt-2 text-blue-600 hover:text-blue-800"
           >
             返回任務列表
@@ -131,7 +131,7 @@ export const ResultPage: React.FC = () => {
                    currentJob.status === 'summarize' ? '生成摘要中' : '處理中'}
           </div>
           <button
-            onClick={() => setCurrentPage('jobs')}
+            onClick={() => setCurrentPage('record')}
             className="mt-4 px-4 py-2 text-blue-600 border border-blue-200 rounded hover:bg-blue-50"
           >
             返回任務列表
@@ -171,7 +171,7 @@ export const ResultPage: React.FC = () => {
               重試
             </button>
             <button
-              onClick={() => setCurrentPage('jobs')}
+              onClick={() => setCurrentPage('record')}
               className="px-4 py-2 text-gray-600 border border-gray-300 rounded hover:bg-gray-50"
             >
               返回列表
@@ -205,7 +205,7 @@ export const ResultPage: React.FC = () => {
           
           <div className="flex gap-2">
             <button
-              onClick={() => setCurrentPage('jobs')}
+              onClick={() => setCurrentPage('record')}
               className="px-4 py-2 text-gray-600 border border-gray-300 rounded-lg hover:bg-gray-50"
             >
               返回列表
@@ -322,7 +322,8 @@ export const ResultPage: React.FC = () => {
         <div className="xl:col-span-2">
           {activeView === 'summary' ? (
             <SummaryView
-              summary={result.summary}
+              summaryMarkdown={result.summary?.minutesMd}
+              summaryData={result.summary}
               onCopyMarkdown={handleCopyMarkdown}
             />
           ) : (

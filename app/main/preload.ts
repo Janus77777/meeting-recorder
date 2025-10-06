@@ -32,8 +32,11 @@ export interface ElectronAPI {
     stop: () => Promise<any>;
     getStatus: () => Promise<any>;
     saveBlob: (filePath: string, buffer: ArrayBuffer) => Promise<any>;
+    copyFile: (srcPath: string, destPath: string) => Promise<any>;
     cleanup: (filePaths: string[]) => Promise<any>;
     getTempDir: () => Promise<any>;
+    fileExists: (filePath: string) => Promise<{ success: boolean; exists?: boolean; error?: string }>;
+    readFile: (filePath: string) => Promise<{ success: boolean; buffer?: ArrayBuffer; size?: number; error?: string }>;
   };
 
   // System audio methods (placeholder)
@@ -48,6 +51,22 @@ export interface ElectronAPI {
 
   // Desktop capturer for system audio
   getAudioSources: () => Promise<any>;
+
+  dialog: {
+    openFile: () => Promise<{ canceled: boolean; filePath?: string }>;
+    openDirectory: () => Promise<{ canceled: boolean; directoryPath?: string }>;
+  };
+
+  // Clipboard methods
+  clipboard: {
+    writeText: (text: string) => Promise<{ success: boolean; error?: string }>;
+  };
+
+  permissions?: {
+    openSystemPreference: (target: 'microphone' | 'screen') => Promise<boolean>;
+    getMediaStatus?: (media: 'microphone') => Promise<string>;
+    requestMediaAccess?: (media: 'microphone') => Promise<boolean>;
+  };
 
   // Auto-updater methods
   updater: {
@@ -105,8 +124,11 @@ const electronAPI: ElectronAPI = {
     stop: () => ipcRenderer.invoke('recording:stop'),
     getStatus: () => ipcRenderer.invoke('recording:getStatus'),
     saveBlob: (filePath, buffer) => ipcRenderer.invoke('recording:saveBlob', filePath, buffer),
+    copyFile: (srcPath, destPath) => ipcRenderer.invoke('recording:copyFile', srcPath, destPath),
     cleanup: (filePaths) => ipcRenderer.invoke('recording:cleanup', filePaths),
-    getTempDir: () => ipcRenderer.invoke('recording:getTempDir')
+    getTempDir: () => ipcRenderer.invoke('recording:getTempDir'),
+    fileExists: (filePath: string) => ipcRenderer.invoke('recording:fileExists', filePath),
+    readFile: (filePath: string) => ipcRenderer.invoke('recording:readFile', filePath)
   },
 
   systemAudio: {
@@ -147,8 +169,22 @@ const electronAPI: ElectronAPI = {
     }
   },
 
+  clipboard: {
+    writeText: (text) => ipcRenderer.invoke('clipboard:writeText', text)
+  },
+
+  permissions: {
+    openSystemPreference: (target) => ipcRenderer.invoke('permissions:open', target),
+    getMediaStatus: (media) => ipcRenderer.invoke('permissions:getMediaStatus', media),
+    requestMediaAccess: (media) => ipcRenderer.invoke('permissions:requestMediaAccess', media)
+  },
+
   getAudioSources: () => ipcRenderer.invoke('desktopCapturer:getAudioSources'),
-  
+  dialog: {
+    openFile: () => ipcRenderer.invoke('dialog:openFile'),
+    openDirectory: () => ipcRenderer.invoke('dialog:openDirectory')
+  },
+
 };
 
 // Add development helpers in development mode

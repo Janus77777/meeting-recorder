@@ -1,14 +1,226 @@
-import React, { useState } from 'react';
+import React, { useRef, useState } from 'react';
 import { SimpleNavigation } from './components/SimpleNavigation';
 import { initializeAPI, getAPI, updateAPISettings } from './services/api';
 import { GeminiAPIClient } from './services/geminiApi';
-import { AppSettings, STTTranscriptionResponse, STTTranscriptSegment, TranscriptSegment } from '@shared/types';
-import { useSettingsStore, useUIStore, useJobsStore, initializeStores } from './services/store';
+import { AppSettings, MeetingStatus, STTTranscriptionResponse, STTTranscriptSegment, TranscriptSegment } from '@shared/types';
+import { useSettingsStore, useUIStore, useJobsStore, initializeStores, useToastActions } from './services/store';
 import PromptsPage from './pages/PromptsPage';
 import { SettingsPage } from './pages/SettingsPage';
+import GoogleSTTSettingsPage from './pages/GoogleSTTSettingsPage';
+import SummaryView from './components/SummaryView';
+import ResultHeader from './components/ResultHeader';
+import KitResultHeader from './components/kit/ResultHeader';
+import ProgressBar from './components/ProgressBar';
+import SummaryCard from './components/SummaryCard';
+import HighlightsCard from './components/HighlightsCard';
+import DecisionsCard from './components/DecisionsCard';
+import TodosCard from './components/TodosCard';
+import TimelineCard from './components/TimelineCard';
+import SummaryCardKit from './components/kit/SummaryCard';
+import HighlightsCardKit from './components/kit/HighlightsCard';
+import DecisionsCardKit from './components/kit/DecisionsCard';
+import TodosCardKit from './components/kit/TodosCard';
+import TimelineCardKit from './components/kit/TimelineCard';
+import TranscriptToolbarKit from './components/kit/TranscriptToolbar';
+import Icon from './components/Icon';
 import { VocabularyService } from './services/vocabularyService';
 import { mergeMediaStreams, requestMicrophoneStream, requestSystemAudioStream, stopStream } from './utils/audioCapture';
+import { validateMediaFile } from './utils/validators';
 import { joinPath, normalizePath } from './utils/path';
+
+const PAGE_META: Record<'record' | 'result' | 'prompts' | 'settings' | 'stt', { title: string; subtitle: string }> = {
+  record: {
+    title: '會議錄音工作室',
+    subtitle: '即時錄音或上傳檔案，啟動智慧轉錄流程'
+  },
+  result: {
+    title: '查看結果',
+    subtitle: '查看完整逐字稿與 AI 摘要，快速回顧會議重點'
+  },
+  prompts: {
+    title: '提示詞管理',
+    subtitle: '調整逐字稿與摘要提示詞，客制化你想要的輸出格式'
+  },
+  settings: {
+    title: '系統設定',
+    subtitle: '連線 API、調整偏好與權限設定'
+  },
+  stt: {
+    title: 'Google STT 詳細設定',
+    subtitle: '配置專案、辨識器、模型與語言等參數'
+  }
+};
+
+type ParsedTranscriptLine = {
+  speaker?: string;
+  text: string;
+};
+
+const MAX_CLEANUP_CHARS = 7000;
+
+const JOB_STATUS_HINTS: Record<string, string> = {
+  queued: '任務排隊中，稍候開始處理',
+  stt: '語音轉文字進行中',
+  summarize: '正在生成摘要',
+  done: '轉錄完成，可前往結果頁查看',
+  failed: '處理失敗'
+};
+
+const openSystemPreference = async (target: 'microphone' | 'screen') => {
+  try {
+    const api = (window as any).electronAPI;
+    if (api?.permissions?.openSystemPreference) {
+      await api.permissions.openSystemPreference(target);
+    }
+  } catch (error) {
+    console.warn('無法自動開啟系統偏好設定:', error);
+  }
+};
+
+const requestMicrophoneAccess = async () => {
+  try {
+    const api = (window as any).electronAPI;
+    if (api?.permissions?.requestMediaAccess) {
+      const granted = await api.permissions.requestMediaAccess('microphone');
+      return granted;
+    }
+  } catch (error) {
+    console.warn('無法請求麥克風權限:', error);
+  }
+  return false;
+};
+
+const chunkTranscriptForCleanup = (transcript: string, maxChars: number = MAX_CLEANUP_CHARS): string[] => {
+  if (!transcript || transcript.trim().length === 0) {
+    return [];
+  }
+
+  const lines = transcript.split(/\r?\n/);
+  const chunks: string[] = [];
+  let buffer: string[] = [];
+  let currentLength = 0;
+
+  const pushBuffer = () => {
+    if (buffer.length) {
+      chunks.push(buffer.join('\n'));
+      buffer = [];
+      currentLength = 0;
+    }
+  };
+
+  for (const line of lines) {
+    const lineLength = line.length + 1; // include newline
+    if (currentLength + lineLength > maxChars && buffer.length > 0) {
+      pushBuffer();
+    }
+    buffer.push(line);
+    currentLength += lineLength;
+  }
+
+  pushBuffer();
+
+  return chunks.length > 0 ? chunks : [transcript];
+};
+
+const cleanupTranscriptInChunks = async (
+  client: GeminiAPIClient,
+  transcript: string,
+  cleanupPrompt?: string
+): Promise<string> => {
+  const chunks = chunkTranscriptForCleanup(transcript);
+  if (chunks.length <= 1) {
+    return client.cleanupTranscript(transcript, cleanupPrompt);
+  }
+
+  const cleanedChunks: string[] = [];
+
+  for (let index = 0; index < chunks.length; index++) {
+    const chunk = chunks[index];
+    try {
+      const cleaned = await client.cleanupTranscript(chunk, cleanupPrompt);
+      cleanedChunks.push(cleaned);
+    } catch (error) {
+      console.warn(`逐字稿分段修正失敗，第 ${index + 1}/${chunks.length} 段將使用原始內容`, error);
+      cleanedChunks.push(chunk);
+    }
+  }
+
+  return cleanedChunks.join('\n\n').replace(/\n{3,}/g, '\n\n').trim();
+};
+
+const parseTranscriptLines = (transcript: string): ParsedTranscriptLine[] => {
+  if (!transcript || !transcript.trim()) {
+    return [];
+  }
+
+  return transcript
+    .split(/\r?\n/)
+    .map(line => line.trim())
+    .filter(line => {
+      if (!line || line.length === 0) return false;
+      if (line.startsWith('# Legend')) return false;
+      // 略過僅包含 Speaker 標記且沒有內容的行
+      if (/^\[?\s*Speaker\s+\d+\s*\]?$/i.test(line)) {
+        return false;
+      }
+      return true;
+    })
+    .map<ParsedTranscriptLine>(line => {
+      const match = line.match(/^\[(.+?)\]:\s*(.*)$/);
+      if (match) {
+        const rawSpeaker = match[1]?.trim();
+        const speaker = rawSpeaker.replace(/\|.*/, '').trim();
+        return {
+          speaker: speaker.length ? speaker : undefined,
+          text: match[2]?.trim() ?? ''
+        };
+      }
+      return { text: line };
+    })
+    .filter(entry => entry.text.length > 0 || (entry.speaker && entry.speaker.length > 0));
+};
+
+const mergeSegmentsWithCleanTranscript = (
+  segments: TranscriptSegment[] = [],
+  cleanedTranscript: string
+): TranscriptSegment[] => {
+  const parsedLines = parseTranscriptLines(cleanedTranscript);
+  if (!parsedLines.length) {
+    return segments;
+  }
+
+  const merged: TranscriptSegment[] = [];
+  const maxIndex = Math.min(segments.length, parsedLines.length);
+
+  for (let i = 0; i < maxIndex; i++) {
+    const segment = segments[i];
+    const line = parsedLines[i];
+    merged.push({
+      ...segment,
+      speaker: line.speaker ?? segment.speaker,
+      text: line.text
+    });
+  }
+
+  if (parsedLines.length > segments.length) {
+    const lastEnd = merged[merged.length - 1]?.end ?? '--:--';
+    for (let i = segments.length; i < parsedLines.length; i++) {
+      const line = parsedLines[i];
+      merged.push({
+        start: lastEnd ?? '--:--',
+        end: '--:--',
+        speaker: line.speaker ?? 'Speaker',
+        text: line.text
+      });
+    }
+  } else if (segments.length > parsedLines.length) {
+    for (let i = parsedLines.length; i < segments.length; i++) {
+      merged.push(segments[i]);
+    }
+  }
+
+  return merged;
+};
 
 const App: React.FC = () => {
   // 使用UI store管理頁面狀態
@@ -29,12 +241,14 @@ const App: React.FC = () => {
     timestamp: string;
     duration: number;
     size: number;
+    filePath?: string;
     chunks?: Blob[];
   }>>([]);
   
   // 使用 Zustand store 管理設定和作業
   const { settings, updateSettings } = useSettingsStore();
-  const { jobs, addJob, updateJob } = useJobsStore();
+  const { showSuccess, showError } = useToastActions();
+  const { jobs, addJob, updateJob, removeJob } = useJobsStore();
   
   // 追蹤設定是否已從 localStorage 恢復
   const [isSettingsHydrated, setIsSettingsHydrated] = useState(false);
@@ -44,9 +258,25 @@ const App: React.FC = () => {
   
   // 結果頁面的分頁狀態
   const [currentJobIndex, setCurrentJobIndex] = useState(0);
+  const [isResultDetailsOpen, setIsResultDetailsOpen] = useState(false);
+  const [detailTab, setDetailTab] = useState<'overview' | 'highlights' | 'decisions' | 'todos' | 'timeline' | 'transcript'>('overview');
+  const [showTranscript, setShowTranscript] = useState(false);
+  // 單頁分頁呈現，不使用內部錨點捲動
   
   // 結果頁面的顯示模式：'summary' | 'transcript'
   const [resultViewMode, setResultViewMode] = useState<'summary' | 'transcript'>('summary');
+  // 結果清單分頁
+  const [resultsPage, setResultsPage] = useState(1);
+  const transcriptContainerRef = useRef<HTMLDivElement | null>(null);
+  const transcriptItemRefs = useRef<Array<HTMLDivElement | null>>([]);
+  const [transcriptQuery, setTranscriptQuery] = useState('');
+  const [transcriptSpeaker, setTranscriptSpeaker] = useState('');
+  const [showRawSummary, setShowRawSummary] = useState(false);
+
+  const cancelRecordingRef = React.useRef(false);
+  const hasResetStaleJobsRef = React.useRef(false);
+  // 進度估算（真實百分比）：以「已處理的媒體秒數 / 總媒體秒數」為主
+  const progressEstRef = React.useRef<Record<string, { startTs: number; totalSeconds: number; processedSeconds: number; lastEmitTs: number }>>({});
 
   // 更新狀態
   const [updateAvailable, setUpdateAvailable] = useState(false);
@@ -112,6 +342,51 @@ const App: React.FC = () => {
       case 'audio/webm;codecs=opus':
       default:
         return 'webm';
+    }
+  };
+
+  const inferMimeFromExtension = (filename: string): string | undefined => {
+    const ext = filename.split('.').pop()?.toLowerCase();
+    switch (ext) {
+      case 'mp3':
+        return 'audio/mpeg';
+      case 'wav':
+        return 'audio/wav';
+      case 'm4a':
+      case 'mp4a':
+        return 'audio/m4a';
+      case 'aac':
+        return 'audio/aac';
+      case 'flac':
+        return 'audio/flac';
+      case 'ogg':
+        return 'audio/ogg';
+      case 'opus':
+        return 'audio/opus';
+      case 'webm':
+        return 'audio/webm';
+      case 'mp4':
+        return 'video/mp4';
+      case 'mov':
+        return 'video/quicktime';
+      case 'avi':
+        return 'video/avi';
+      default:
+        return undefined;
+    }
+  };
+
+  const handleChooseSavePath = async () => {
+    try {
+      const picked = (window as any).electronAPI?.dialog?.openDirectory ? await (window as any).electronAPI.dialog.openDirectory() : { canceled: true };
+      if (picked?.canceled) return;
+      const dir = picked.directoryPath as string;
+      if (dir && dir.trim()) {
+        updateSettings({ recordingSavePath: dir });
+        showSuccess?.(`已設定錄音儲存目錄：${dir}`);
+      }
+    } catch (e) {
+      showError?.(`選擇儲存目錄失敗：${(e as Error).message}`);
     }
   };
 
@@ -318,6 +593,34 @@ const App: React.FC = () => {
     return `${minutes.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
   };
 
+  const formatEta = (seconds: number): string => {
+    if (!Number.isFinite(seconds) || seconds < 0) return '--:--';
+    const m = Math.floor(seconds / 60);
+    const s = Math.floor(seconds % 60);
+    return `${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}`;
+  };
+
+  const safeUpdateJobProgress = (jobId: string, processed: number, total: number, stageLabel: string) => {
+    const now = Date.now();
+    const state = progressEstRef.current[jobId] || { startTs: now, totalSeconds: total || 1, processedSeconds: 0, lastEmitTs: 0 };
+    state.totalSeconds = Math.max(total || 1, 1);
+    state.processedSeconds = Math.min(Math.max(processed, 0), state.totalSeconds);
+    progressEstRef.current[jobId] = state;
+
+    const elapsed = Math.max((now - state.startTs) / 1000, 0.001);
+    const speed = state.processedSeconds / elapsed; // 每秒處理的媒體秒數
+    const remain = Math.max(state.totalSeconds - state.processedSeconds, 0);
+    const eta = speed > 0 ? remain / speed : Infinity;
+    const percent = Math.max(0, Math.min(100, Math.round((state.processedSeconds / state.totalSeconds) * 100)));
+
+    // 節流，避免狀態欄訊息快速閃動
+    if (now - state.lastEmitTs < 800 && percent < 100) return;
+    state.lastEmitTs = now;
+
+    const hint = `${stageLabel} · ${percent}%（預估剩餘 ${formatEta(eta)}）`;
+    updateJob(jobId, { progress: percent, progressMessage: hint });
+  };
+
   const buildTranscriptFromSTTSegments = (segments: STTTranscriptSegment[] = []): {
     formattedSegments: TranscriptSegment[];
     text: string;
@@ -370,8 +673,9 @@ const App: React.FC = () => {
     const formattedSegments: TranscriptSegment[] = combined.map(seg => {
       const speakerLabel = seg.speakerTag ? `Speaker ${seg.speakerTag}` : 'Speaker';
       return {
-        start: formatSecondsToTimestamp(seg.startTime),
-        end: formatSecondsToTimestamp(seg.endTime),
+        // 以數值秒數儲存，確保之後跳轉對齊 Google STT 時間戳
+        start: seg.startTime,
+        end: seg.endTime,
         speaker: speakerLabel,
         text: seg.words.join(' ').replace(/\s+/g, ' ').trim()
       };
@@ -399,31 +703,50 @@ const App: React.FC = () => {
 
   const getBlobDuration = (blob: Blob): Promise<number> => {
     return new Promise((resolve, reject) => {
-      const audio = document.createElement('audio');
+      const isVideo = !!blob.type && blob.type.startsWith('video');
+      const mediaEl = document.createElement(isVideo ? 'video' : 'audio') as HTMLMediaElement;
       const url = URL.createObjectURL(blob);
 
       const cleanup = () => {
         URL.revokeObjectURL(url);
-        audio.remove();
+        mediaEl.remove();
       };
 
-      audio.preload = 'metadata';
-      audio.onloadedmetadata = () => {
-        const duration = audio.duration;
+      let timeoutHandle: ReturnType<typeof setTimeout> | null = setTimeout(() => {
+        timeoutHandle = null;
         cleanup();
-        if (!Number.isFinite(duration)) {
-          reject(new Error('無法取得音訊長度'));
+        reject(new Error('媒體長度讀取逾時'));
+      }, 10000);
+
+      mediaEl.preload = 'metadata';
+      if (isVideo) {
+        mediaEl.muted = true;
+        mediaEl.setAttribute('playsinline', 'true');
+      }
+
+      mediaEl.onloadedmetadata = () => {
+        if (timeoutHandle) {
+          clearTimeout(timeoutHandle);
+        }
+        const duration = mediaEl.duration;
+        cleanup();
+        if (!Number.isFinite(duration) || duration <= 0) {
+          reject(new Error('無法取得媒體長度'));
         } else {
           resolve(duration);
         }
       };
 
-      audio.onerror = () => {
+      mediaEl.onerror = () => {
+        if (timeoutHandle) {
+          clearTimeout(timeoutHandle);
+        }
         cleanup();
-        reject(new Error('音訊載入失敗'));
+        reject(new Error('媒體載入失敗'));
       };
 
-      audio.src = url;
+      mediaEl.src = url;
+      mediaEl.load();
     });
   };
 
@@ -484,6 +807,58 @@ const App: React.FC = () => {
   React.useEffect(() => {
     checkAudioPermission();
   }, []);
+
+  React.useEffect(() => {
+    const completed = jobs.filter(job => job.status === 'done' && (job.summary || job.transcript));
+    setCurrentJobIndex(prev => {
+      if (completed.length === 0) {
+        return 0;
+      }
+      const clamped = Math.max(0, Math.min(prev, completed.length - 1));
+      return clamped;
+    });
+  }, [jobs]);
+
+  // 依據結果數調整分頁（避免刪除後頁碼超出）
+  React.useEffect(() => {
+    const count = jobs.filter(job => job.status === 'done' && (job.summary || job.transcript)).length;
+    const pageSize = 12;
+    const totalPages = Math.max(1, Math.ceil(count / pageSize));
+    setResultsPage(prev => Math.min(prev, totalPages));
+  }, [jobs]);
+
+  // 移除整體縮放策略，改以 CSS 斷點壓縮/隱藏控制高度，避免裁切
+
+  React.useEffect(() => {
+    if (hasResetStaleJobsRef.current) {
+      return;
+    }
+
+    if (processingJobs.size > 0) {
+      return;
+    }
+
+    if (jobs.length === 0) {
+      return;
+    }
+
+    const pendingJobs = jobs.filter(job => job.status !== 'done' && job.status !== 'failed');
+    if (pendingJobs.length === 0) {
+      hasResetStaleJobsRef.current = true;
+      return;
+    }
+
+    pendingJobs.forEach(job => {
+      updateJob(job.id, {
+        status: 'failed',
+        progress: 0,
+        progressMessage: `先前未完成的任務（${job.filename}）已停止，請重新啟動轉錄。`,
+        errorMessage: '應用程式重新啟動後，上一個任務已終止。'
+      });
+    });
+
+    hasResetStaleJobsRef.current = true;
+  }, [jobs, processingJobs, updateJob]);
 
   // 設置更新監聽器
   React.useEffect(() => {
@@ -602,22 +977,54 @@ const App: React.FC = () => {
 
   const checkAudioPermission = async () => {
     try {
+      const osStatus = await window.electronAPI?.permissions?.getMediaStatus?.('microphone');
+      console.log('🔍 macOS systemPreferences 麥克風狀態:', osStatus);
+
+      switch (osStatus) {
+        case 'authorized':
+        case 'granted':
+          setHasAudioPermission(true);
+          setRecordingStatus('已獲得麥克風權限，準備就緒');
+          return;
+        case 'denied':
+          setHasAudioPermission(false);
+          setRecordingStatus('麥克風權限被拒絕，請在「系統設定 > 隱私權與安全性 > 麥克風」允許 Electron');
+          await openSystemPreference('microphone');
+          return;
+        case 'not-determined':
+        case 'prompt':
+          setHasAudioPermission(null);
+          console.log('🔔 OS 顯示尚未決定，嘗試 askForMediaAccess');
+          const granted = await requestMicrophoneAccess();
+          if (granted) {
+            setHasAudioPermission(true);
+            setRecordingStatus('已取得麥克風權限，準備就緒');
+          } else {
+            setRecordingStatus('仍需要授權麥克風權限');
+          }
+          return;
+        default:
+          console.warn('未知的麥克風權限狀態:', osStatus);
+          break;
+      }
+
+      // Fallback：瀏覽器層級權限（例如非 macOS 或系統 API 不可用）
       if (navigator.permissions && navigator.permissions.query) {
         const permissionStatus = await navigator.permissions.query({ name: 'microphone' as PermissionName });
-        console.log('麥克風權限狀態:', permissionStatus.state);
-        
+        console.log('🔍 Browser Permission API mic 狀態:', permissionStatus.state);
+
         if (permissionStatus.state === 'granted') {
           setHasAudioPermission(true);
           setRecordingStatus('已獲得麥克風權限，準備就緒');
         } else if (permissionStatus.state === 'denied') {
           setHasAudioPermission(false);
-          setRecordingStatus('麥克風權限被拒絕');
+          setRecordingStatus('麥克風權限被拒絕，請檢查瀏覽器/應用設定');
         } else {
           setHasAudioPermission(null);
-          setRecordingStatus('需要麥克風權限');
+          setRecordingStatus('需要授權麥克風權限');
         }
       } else {
-        console.log('不支援權限查詢，將直接嘗試訪問');
+        console.log('不支援 Permission API，將直接嘗試訪問');
         setRecordingStatus('準備測試麥克風...');
       }
     } catch (error) {
@@ -629,7 +1036,27 @@ const App: React.FC = () => {
   const testAudioAccess = async () => {
     try {
       setRecordingStatus('正在請求麥克風權限...');
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      let userMediaError: Error | null = null;
+
+      try {
+        const permissionStatus = navigator.permissions && await navigator.permissions.query({ name: 'microphone' as PermissionName });
+        if (permissionStatus && permissionStatus.state === 'prompt') {
+          await requestMicrophoneAccess();
+        }
+      } catch (permissionError) {
+        console.warn('查詢或請求麥克風權限時出錯:', permissionError);
+      }
+
+      let stream: MediaStream | null = null;
+      try {
+        stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      } catch (error) {
+        userMediaError = error as Error;
+      }
+
+      if (!stream) {
+        throw userMediaError ?? new Error('無法建立麥克風串流');
+      }
       console.log('成功獲得音訊串流:', stream);
       
       // 測試完成，立即關閉
@@ -641,7 +1068,14 @@ const App: React.FC = () => {
     } catch (error) {
       console.error('無法訪問麥克風:', error);
       setHasAudioPermission(false);
-      setRecordingStatus('無法訪問麥克風：' + (error as Error).message);
+      const err = error as DOMException;
+      if (err?.name === 'NotAllowedError' || err?.name === 'SecurityError') {
+        setRecordingStatus('麥克風權限被 macOS 拒絕，請在「系統設定 > 隱私權與安全性 > 麥克風」勾選 Electron 後重啟應用');
+        await openSystemPreference('microphone');
+        await requestMicrophoneAccess();
+      } else {
+        setRecordingStatus('無法訪問麥克風：' + err.message);
+      }
       return false;
     }
   };
@@ -651,26 +1085,30 @@ const App: React.FC = () => {
     try {
       setRecordingStatus('正在測試系統聲音權限...');
       console.log('🎵 開始測試系統聲音權限...');
-      
-      // 檢查 electronAPI 是否可用
-      const electronAPI = (window as any).electronAPI;
-      if (!electronAPI) {
-        console.error('❌ window.electronAPI 未定義');
-        setRecordingStatus('❌ electronAPI 未定義');
-        return false;
+      const resolvedPlatform = platform === 'unknown' && /mac/i.test(navigator.userAgent)
+        ? 'darwin'
+        : platform;
+
+      const result = await requestSystemAudioStream({
+        platform: resolvedPlatform,
+        preferDisplayCapture: true,
+        logger: (message, data) => console.log(message, data ?? '')
+      });
+
+      result.warnings.forEach(warning => console.warn('⚠️ 系統聲音警告:', warning));
+
+      if (result.stream) {
+        stopStream(result.stream);
+        setRecordingStatus('✅ 系統聲音權限測試成功，可擷取系統音訊');
+        return true;
       }
-      
-      console.log('✅ electronAPI 可用，方法:', Object.keys(electronAPI));
-      
-      if (typeof electronAPI.getAudioSources !== 'function') {
-        console.error('❌ electronAPI.getAudioSources 不存在');
-        setRecordingStatus('❌ getAudioSources 方法不存在');
-        return false;
+
+      const hint = result.error || result.warnings[0] || '系統聲音權限測試失敗';
+      setRecordingStatus(`❌ 系統聲音權限測試失敗：${hint}`);
+      if (/權限|允許|授權/.test(hint)) {
+        await openSystemPreference('screen');
       }
-      
-      console.log('✅ getAudioSources 方法存在，開始調用...');
-      setRecordingStatus('✅ API 檢查完成，系統聲音功能可用');
-      return true;
+      return false;
       
     } catch (error) {
       console.error('❌ 測試過程錯誤:', error);
@@ -687,6 +1125,8 @@ const App: React.FC = () => {
     try {
       setRecordingStatus('正在啟動錄音...');
       
+      cancelRecordingRef.current = false;
+
       const streams: MediaStream[] = [];
       
       // 根據錄音模式獲取對應的音訊流
@@ -724,11 +1164,28 @@ const App: React.FC = () => {
         } else if (recordingMode === 'system') {
           const reason = systemResult.error || '無法獲取系統聲音來源';
           console.error('❌ 系統聲音擷取失敗:', reason);
+          if (/Requested device not found/i.test(reason)) {
+            const friendlyMessage = 'macOS 目前未提供系統音訊輸出來源；若需錄製系統聲音，請安裝虛擬音訊驅動（如 BlackHole 或 Loopback）並在偏好設定中授權。';
+            setRecordingStatus(`系統聲音擷取失敗：${friendlyMessage}`);
+            alert(friendlyMessage);
+          } else if (/權限|允許|授權/.test(reason)) {
+            setRecordingStatus(`系統聲音擷取失敗：${reason}`);
+            await openSystemPreference('screen');
+          } else {
+            setRecordingStatus(`系統聲音擷取失敗：${reason}`);
+          }
           throw new Error(reason);
         } else {
           console.warn('⚠️ 系統聲音獲取失敗，繼續使用麥克風:', systemResult.error);
           if (systemResult.error) {
-            setRecordingStatus(`系統聲音取得失敗：${systemResult.error}，將僅錄製麥克風`);
+            let fallbackMessage = systemResult.error;
+            if (/Requested device not found/i.test(systemResult.error)) {
+              fallbackMessage = 'macOS 尚未偵測到可錄製的系統音訊來源，將僅錄製麥克風。可考慮安裝虛擬音訊驅動（例如 BlackHole）。';
+            }
+            setRecordingStatus(`系統聲音取得失敗：${fallbackMessage}`);
+            if (/權限|允許|授權/.test(systemResult.error)) {
+              await openSystemPreference('screen');
+            }
           }
         }
       }
@@ -765,19 +1222,67 @@ const App: React.FC = () => {
 
       recorder.onstop = async () => {
         console.log('錄音停止，總共', chunks.length, '個音訊片段');
+        const wasCancelled = cancelRecordingRef.current;
+
+        // 清理所有音訊流
+        activeStreams.forEach(stream => {
+          console.log('關閉音訊串流');
+          stopStream(stream);
+        });
+
+        setSystemStream(null);
+        setMicrophoneStream(null);
+        setIsRecording(false);
+
+        if (wasCancelled) {
+          setAudioChunks([]);
+          setRecordingStatus('已取消錄音，未保存任何檔案');
+          return;
+        }
+
         const audioBlob = new Blob(chunks, { type: 'audio/webm;codecs=opus' });
         console.log('最終音訊檔案大小:', audioBlob.size, '位元組');
         
         // 生成檔名
         const timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
         const modeLabel = recordingMode === 'both' ? 'mixed' : recordingMode === 'system' ? 'system' : 'mic';
-        const filename = `meeting-${modeLabel}-${timestamp}.webm`;
+        const mode = settings.transcriptionMode || (settings.useGemini ? 'gemini_direct' : 'hybrid_stt');
+        const filenameBase = `meeting-${modeLabel}-${timestamp}`;
+        const filename = `${filenameBase}.wav`;
         
         try {
-          // 自動保存錄音檔案
-          await saveRecordingFile(audioBlob, filename);
+          // 一律：WebM → WAV（本地保存），確保可播放
+          let savedPath = '';
+          let tempWebmPath: string | null = null;
+          const tempDirResult = await window.electronAPI.recording.getTempDir();
+          const tempDir = tempDirResult.success && tempDirResult.tempDir ? tempDirResult.tempDir : undefined;
+          if (!tempDir) throw new Error('無法取得暫存目錄');
+          tempWebmPath = joinPath(tempDir, `${filenameBase}.webm`);
+          await window.electronAPI.recording.saveBlob(tempWebmPath, await audioBlob.arrayBuffer());
+          const prep = await window.electronAPI.stt.prepareAudio({ sourcePath: tempWebmPath, mimeType: 'audio/webm', sampleRate: 16_000 });
+          if (!prep.success || !prep.wavPath) throw new Error(prep.error || 'WAV 轉檔失敗');
+          const wavPathTemp = prep.wavPath;
+          let baseDirectory: string | undefined;
+          const preferred = settings.recordingSavePath?.trim();
+          if (preferred) {
+            if (preferred.startsWith('~/')) {
+              const homePath = await window.electronAPI.app.getPath('home');
+              const relative = preferred.slice(2);
+              baseDirectory = joinPath(homePath, relative);
+            } else if (!preferred.startsWith('~')) {
+              baseDirectory = preferred;
+            }
+          }
+          if (!baseDirectory) {
+            baseDirectory = await window.electronAPI.app.getPath('downloads');
+          }
+          const normalizedBase = normalizePath(baseDirectory);
+          const wavFilename = `${filenameBase}.wav`;
+          const destPath = joinPath(normalizedBase, wavFilename);
+          const copyRes = await window.electronAPI.recording.copyFile(wavPathTemp, destPath);
+          if (!copyRes.success) throw new Error(copyRes.error || 'WAV 儲存失敗');
+          savedPath = destPath;
           
-          // 保存錄音記錄到應用狀態
           const newRecording = {
             id: Date.now().toString(),
             filename,
@@ -785,29 +1290,20 @@ const App: React.FC = () => {
             timestamp: new Date().toLocaleString('zh-TW'),
             duration: recordingTime,
             size: audioBlob.size,
+            filePath: savedPath,
             chunks: [...chunks]
           };
           
           setRecordings(prev => [newRecording, ...prev]);
           setRecordingStatus(`錄音完成！檔案已自動保存: ${filename} (${(audioBlob.size / 1024).toFixed(1)} KB)`);
-          setAudioChunks([...chunks]); // 保存原始音訊片段供後續使用
+          setAudioChunks([...chunks]);
           
+          // 交給轉錄作業（仍傳遞 WebM blob 方便切段；作業內會做切段與轉檔）
+          startTranscriptionJob(audioBlob, filename, [...chunks], recordingTime, { sourcePath: tempWebmPath || savedPath });
         } catch (error) {
           console.error('錄音保存失敗:', error);
           setRecordingStatus('錄音保存失敗: ' + (error as Error).message);
         }
-        
-        // 清理所有音訊流
-        activeStreams.forEach(stream => {
-          console.log('關閉音訊串流');
-          stopStream(stream);
-        });
-        
-        setSystemStream(null);
-        setMicrophoneStream(null);
-        
-        // 自動啟動轉錄流程
-        startTranscriptionJob(audioBlob, filename, [...chunks], recordingTime);
       };
 
       recorder.onerror = (event) => {
@@ -832,6 +1328,31 @@ const App: React.FC = () => {
       activeStreams.forEach(stream => stopStream(stream));
       setSystemStream(null);
       setMicrophoneStream(null);
+    }
+  };
+
+  const cancelRecording = () => {
+    if (!mediaRecorder || mediaRecorder.state === 'inactive') {
+      setRecordingStatus('目前沒有進行中的錄音');
+      return;
+    }
+
+    cancelRecordingRef.current = true;
+    setRecordingStatus('正在取消錄音...');
+    try {
+      mediaRecorder.stop();
+      setIsRecording(false);
+      setMediaRecorder(null);
+      setTimeout(() => {
+        stopStream(systemStream);
+        stopStream(microphoneStream);
+        setSystemStream(null);
+        setMicrophoneStream(null);
+      }, 500);
+    } catch (error) {
+      console.error('取消錄音時發生錯誤:', error);
+      setRecordingStatus('取消錄音失敗：' + (error as Error).message);
+      cancelRecordingRef.current = false;
     }
   };
 
@@ -869,7 +1390,7 @@ const App: React.FC = () => {
   };
 
   // 自動保存錄音檔案
-  const saveRecordingFile = async (blob: Blob, filename: string) => {
+  const saveRecordingFile = async (blob: Blob, filename: string): Promise<string> => {
     try {
       console.log(`🎵 開始儲存錄音檔案: ${filename}`);
       console.log('📁 檔案大小:', blob.size, '位元組');
@@ -928,7 +1449,8 @@ const App: React.FC = () => {
     audioBlob: Blob,
     filename: string,
     originalChunks: Blob[] = [],
-    durationSeconds: number = recordingTime
+    durationSeconds: number = recordingTime,
+    options: { sourcePath?: string } = {}
   ) => {
     // 防止重複執行：檢查是否已經在處理相同檔案
     if (processingJobs.has(filename)) {
@@ -939,11 +1461,13 @@ const App: React.FC = () => {
     // 標記為處理中
     setProcessingJobs(prev => new Set([...prev, filename]));
     
+    let jobId: string | null = null;
+
     try {
       console.log('開始轉錄流程:', filename);
       
       // 創建作業記錄
-      const jobId = Date.now().toString();
+      jobId = Date.now().toString();
       const newJob = {
         id: jobId,
         meetingId: jobId, // 使用 jobId 作為 meetingId
@@ -952,7 +1476,9 @@ const App: React.FC = () => {
         participants: [], // 錄音沒有參與者信息
         status: 'queued' as const,
         progress: 0,
-        createdAt: new Date().toLocaleString('zh-TW')
+        createdAt: new Date().toLocaleString('zh-TW'),
+        audioFile: options.sourcePath,
+        progressMessage: JOB_STATUS_HINTS.queued
       };
       
       addJob(newJob);
@@ -976,7 +1502,18 @@ const App: React.FC = () => {
       
     } catch (error) {
       console.error('轉錄流程啟動失敗:', error);
-      setRecordingStatus('轉錄啟動失敗: ' + (error as Error).message);
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      if (jobId) {
+        const latestJob = useJobsStore.getState().jobs.find(job => job.id === jobId);
+        if (latestJob) {
+          updateJob(jobId, {
+            status: 'failed',
+            progressMessage: `${JOB_STATUS_HINTS.failed}：${errorMessage}`,
+            errorMessage
+          });
+        }
+      }
+      setRecordingStatus('轉錄啟動失敗: ' + errorMessage);
     } finally {
       // 清除處理狀態，允許重新執行
       setProcessingJobs(prev => {
@@ -984,6 +1521,43 @@ const App: React.FC = () => {
         newSet.delete(filename);
         return newSet;
       });
+    }
+  };
+
+  const handleDeleteJob = async (jobId: string) => {
+    const targetJob = jobs.find(job => job.id === jobId);
+    if (!targetJob) {
+      return;
+    }
+
+    const confirmMessage = `確定要刪除「${targetJob.filename}」的轉錄結果嗎？` +
+      (targetJob.audioFile ? '\n\n這會一併移除本地錄音檔案：\n' + targetJob.audioFile : '');
+
+    if (!window.confirm(confirmMessage)) {
+      return;
+    }
+
+    let fileRemovalError: Error | null = null;
+
+    if (targetJob.audioFile) {
+      try {
+        const cleanupResult = await window.electronAPI?.recording?.cleanup([targetJob.audioFile]);
+        if (cleanupResult && cleanupResult.success === false) {
+          fileRemovalError = new Error(cleanupResult.error || '錄音檔案刪除失敗');
+        }
+      } catch (error) {
+        console.error('刪除錄音檔案失敗:', error);
+        fileRemovalError = error instanceof Error ? error : new Error(String(error));
+      }
+    }
+
+    removeJob(jobId);
+    setRecordings(prev => prev.filter(recording => recording.filePath !== targetJob.audioFile));
+
+    if (fileRemovalError) {
+      alert(`已移除轉錄結果，但刪除錄音檔案時發生錯誤：${fileRemovalError.message}`);
+    } else {
+      alert('已刪除轉錄結果。');
     }
   };
 
@@ -1016,6 +1590,13 @@ const App: React.FC = () => {
       if (!geminiKey) {
         throw new Error('請先設定 API 金鑰，以便進行後續摘要與後處理');
       }
+
+      const geminiClient = new GeminiAPIClient(geminiKey, {
+        preferredModel: currentSettings.geminiPreferredModel,
+        enableFallback: currentSettings.geminiEnableFallback,
+        retryConfig: currentSettings.geminiRetryConfig,
+        diagnosticMode: currentSettings.geminiDiagnosticMode
+      });
 
       setRecordingStatus('初始化 Google STT 服務...');
       const initResult = await window.electronAPI.stt.initialize({
@@ -1068,22 +1649,31 @@ const App: React.FC = () => {
       const aggregatedSegments: STTTranscriptSegment[] = [];
       const transcriptParts: string[] = [];
 
-      let enableSpeakerDiarization = sttSettings.enableSpeakerDiarization ?? true;
       const recognizerIdLower = (sttSettings.recognizerId || '').toLowerCase();
       const modelIdLower = (sttSettings.model || '').toLowerCase();
-      const isChirpRecognizer = recognizerIdLower.includes('chirp') || modelIdLower.includes('chirp');
-      if (enableSpeakerDiarization && isChirpRecognizer) {
-        enableSpeakerDiarization = false;
-        console.warn('選用的 Google STT 模型 (Chirp) 不支援說話者分段，已自動停用該功能。');
-        setRecordingStatus('目前選用的 Google STT 模型不支援說話者分段，已自動停用該功能。');
+      const isChirp3 = modelIdLower.includes('chirp_3') || recognizerIdLower.includes('chirp_3');
+      // 語言：chirp_3 強制用簡中；其他使用使用者設定
+      const langForThisRun = isChirp3 ? 'cmn-Hans-CN' : (sttSettings.languageCode || 'zh-TW');
+      // 僅在模型為 chirp_3 且語言為簡中時開啟 diarization
+      let enableSpeakerDiarization = Boolean(sttSettings.enableSpeakerDiarization) && isChirp3 && langForThisRun === 'cmn-Hans-CN';
+      if (!enableSpeakerDiarization && Boolean(sttSettings.enableSpeakerDiarization) && (!isChirp3 || langForThisRun !== 'cmn-Hans-CN')) {
+        console.warn('Diarization 僅支援 chirp_3 + cmn-Hans-CN，本次已自動停用。');
+        setRecordingStatus('Diarization 僅支援 chirp_3 + 簡中 (cmn-Hans-CN)，本次已自動停用。');
       }
+
+      // 初始化真實進度估算
+      const totalSecondsForStt = sttSegments.reduce((sum, s) => sum + (s.duration || (s.end - s.start) || 0), 0);
+      progressEstRef.current[jobId] = { startTs: Date.now(), totalSeconds: Math.max(totalSecondsForStt, 1), processedSeconds: 0, lastEmitTs: 0 };
 
       window.electronAPI.stt.onProgress(event => {
         if (event.message) {
+          // 僅更新本地狀態提示，避免干擾使用者可讀的穩定訊息
           setRecordingStatus(event.message);
         }
         if (typeof event.progress === 'number') {
-          updateJob(jobId, { progress: Math.min(90, Math.max(event.progress, 5)) });
+          // 我們用真實估算為主，這裡不直接覆蓋百分比，僅在非常早期提供最低進度
+          const normalized = Math.min(25, Math.max(event.progress, 3));
+          updateJob(jobId, { progress: normalized });
         }
       });
 
@@ -1101,9 +1691,9 @@ const App: React.FC = () => {
           sourcePath: preparedWavPath,
           startTimeSeconds: segment.start,
           endTimeSeconds: segment.end,
-          languageCode: sttSettings.languageCode || 'zh-TW',
-          enableWordTimeOffsets: false,
-          enableSpeakerDiarization: false,
+          languageCode: langForThisRun,
+          enableWordTimeOffsets: true,
+          enableSpeakerDiarization: enableSpeakerDiarization,
           minSpeakerCount: enableSpeakerDiarization ? (sttSettings.minSpeakerCount ?? 1) : undefined,
           maxSpeakerCount: enableSpeakerDiarization ? (sttSettings.maxSpeakerCount ?? 6) : undefined,
           mimeType: 'audio/wav'
@@ -1119,8 +1709,13 @@ const App: React.FC = () => {
 
         transcriptParts.push(sttResponse.transcript);
 
-        const segmentProgress = 10 + Math.floor(((segment.index + 1) / sttSegments.length) * 60);
-        updateJob(jobId, { progress: segmentProgress });
+        // 按已完成媒體秒數更新真實進度與 ETA
+        const est = progressEstRef.current[jobId];
+        if (est) {
+          const d = segment.duration || (segment.end - segment.start) || 0;
+          est.processedSeconds = Math.min(est.totalSeconds, est.processedSeconds + Math.max(d, 0));
+          safeUpdateJobProgress(jobId, est.processedSeconds, est.totalSeconds, '語音轉文字處理中');
+        }
       }
 
       let formattedSegments: TranscriptSegment[] = [];
@@ -1140,8 +1735,8 @@ const App: React.FC = () => {
 
       if ((!formattedSegments || formattedSegments.length === 0) && finalTranscript) {
         formattedSegments = sttSegments.map((segment, idx) => ({
-          start: formatSecondsToTimestamp(segment.start),
-          end: formatSecondsToTimestamp(segment.end),
+          start: segment.start,
+          end: segment.end,
           speaker: `Segment ${idx + 1}`,
           text: (transcriptParts[idx] || finalTranscript)
             .replace(/\s+/g, ' ')
@@ -1153,47 +1748,88 @@ const App: React.FC = () => {
         throw new Error('無法取得 Google STT 轉錄結果');
       }
 
-      if (settings.vocabularyList && settings.vocabularyList.length > 0) {
-        finalTranscript = VocabularyService.applyVocabularyCorrections(finalTranscript, settings.vocabularyList);
+      if (currentSettings.vocabularyList && currentSettings.vocabularyList.length > 0) {
+        finalTranscript = VocabularyService.applyVocabularyCorrections(finalTranscript, currentSettings.vocabularyList);
       }
 
-      setRecordingStatus('Google STT 完成，準備生成會議摘要...');
-      updateJob(jobId, { progress: 80, status: 'summarize' });
+      setRecordingStatus('Google STT 完成，啟動 Gemini 逐字稿修正...');
+      const estAfterStt = progressEstRef.current[jobId];
+      if (estAfterStt) safeUpdateJobProgress(jobId, Math.max(estAfterStt.processedSeconds, estAfterStt.totalSeconds * 0.9), estAfterStt.totalSeconds, '逐字稿修正中');
+      updateJob(jobId, { status: 'stt' });
 
-      const geminiClient = new GeminiAPIClient(geminiKey, {
-        preferredModel: currentSettings.geminiPreferredModel,
-        enableFallback: currentSettings.geminiEnableFallback,
-        retryConfig: currentSettings.geminiRetryConfig,
-        diagnosticMode: currentSettings.geminiDiagnosticMode
-      });
+      let cleanedTranscript = await cleanupTranscriptInChunks(
+        geminiClient,
+        finalTranscript,
+        currentSettings.customTranscriptCleanupPrompt
+      );
+
+      // 簡體 → 繁體（台灣）
+      try {
+        const { toTW } = await import('./utils/zhConvert');
+        cleanedTranscript = await toTW(cleanedTranscript);
+      } catch {}
+
+      if (!cleanedTranscript) {
+        throw new Error('逐字稿修正後的內容為空');
+      }
+
+      finalTranscript = cleanedTranscript;
+      formattedSegments = mergeSegmentsWithCleanTranscript(formattedSegments, finalTranscript);
+
+      setRecordingStatus('逐字稿修正完成，準備生成會議摘要...');
+      if (estAfterStt) safeUpdateJobProgress(jobId, Math.max(estAfterStt.processedSeconds, estAfterStt.totalSeconds * 0.95), estAfterStt.totalSeconds, '生成會議摘要');
+      updateJob(jobId, { status: 'summarize' });
 
       let summaryMarkdown = '';
       let overallSummary = '';
 
-      if (settings.customSummaryPrompt) {
-        const summaryText = await geminiClient.generateCustomSummary(finalTranscript, settings.customSummaryPrompt);
+      if (currentSettings.customSummaryPrompt) {
+        const summaryText = await geminiClient.generateCustomSummary(cleanedTranscript, currentSettings.customSummaryPrompt);
         summaryMarkdown = summaryText;
         overallSummary = summaryText;
       } else {
-        const structuredSummary = await geminiClient.generateStructuredSummaryFromTranscript(finalTranscript);
-        summaryMarkdown = structuredSummary.minutesMd;
+        const structuredSummary = await geminiClient.generateStructuredSummaryFromTranscript(cleanedTranscript);
+        // 轉繁
+        try {
+          const { toTW } = await import('./utils/zhConvert');
+          summaryMarkdown = await toTW(structuredSummary.minutesMd || '');
+        } catch {
+          summaryMarkdown = structuredSummary.minutesMd;
+        }
         overallSummary = structuredSummary.overallSummary;
       }
 
-      updateJob(jobId, {
-        status: 'done',
-        progress: 100,
-        transcript: finalTranscript,
-        transcriptSegments: formattedSegments,
-        summary: summaryMarkdown
-      });
+      // 產生「標題式大綱」的時間軸（可點擊跳到逐字稿）
+      let timelineItems: Array<{ time?: string; item: string; desc?: string }> = [];
+      try {
+        const tl = await geminiClient.generateTimelineOutline(
+          (formattedSegments || []).map(s => ({ start: typeof s.start === 'number' ? s.start : 0, end: typeof s.end === 'number' ? s.end : undefined, text: s.text }))
+        );
+        // 簡→繁
+        try {
+          const { toTW } = await import('./utils/zhConvert');
+          timelineItems = await Promise.all((tl || []).map(async (t: any) => ({ time: t.time, item: await toTW(t.item || ''), desc: t.desc ? await toTW(t.desc) : undefined })));
+        } catch {
+          timelineItems = (tl || []).map((t: any) => ({ time: t.time, item: t.item, desc: t.desc }));
+        }
+      } catch (e) {
+        console.warn('產生時間軸大綱失敗（將以空白略過）:', e);
+      }
 
-      setRecordingStatus('Google STT 轉錄完成！可到「任務」或「結果」頁面查看');
+      updateJob(jobId, { status: 'done', transcript: cleanedTranscript, transcriptSegments: formattedSegments, summary: summaryMarkdown, timelineItems });
+      if (estAfterStt) safeUpdateJobProgress(jobId, estAfterStt.totalSeconds, estAfterStt.totalSeconds, '完成');
+
+      setRecordingStatus('Google STT 轉錄完成！可在結果頁查看詳細內容');
 
     } catch (error) {
       console.error('Google STT 轉錄失敗:', error);
-      updateJob(jobId, { status: 'failed' });
-      setRecordingStatus('Google STT 轉錄失敗：' + (error instanceof Error ? error.message : String(error)));
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      updateJob(jobId, {
+        status: 'failed',
+        errorMessage,
+        progressMessage: `${JOB_STATUS_HINTS.failed}：${errorMessage}`
+      });
+      setRecordingStatus('Google STT 轉錄失敗：' + errorMessage);
     } finally {
       if (cleanupPaths.length > 0) {
         window.electronAPI.recording.cleanup(cleanupPaths).catch(() => void 0);
@@ -1237,6 +1873,8 @@ const App: React.FC = () => {
 
       const mimeType = audioBlob.type || 'audio/webm';
       const transcriptSegments: string[] = [];
+      const totalSecondsForDirect = segments.reduce((sum, s) => sum + (s.duration || (s.end - s.start) || 0), 0);
+      progressEstRef.current[jobId] = { startTs: Date.now(), totalSeconds: Math.max(totalSecondsForDirect, 1), processedSeconds: 0, lastEmitTs: 0 };
 
       updateJob(jobId, { status: 'stt', progress: 5 });
       setRecordingStatus(`API 連接成功，準備處理音訊（共 ${segments.length} 段）...`);
@@ -1254,8 +1892,12 @@ const App: React.FC = () => {
         const uploadResult = await geminiClient.uploadFile(segment.blob, segmentFilename);
         console.log(`Gemini 段落上傳完成 (${segment.index + 1}/${segments.length}):`, uploadResult.name);
 
-        const uploadProgress = 5 + Math.floor(((segment.index + 1) / segments.length) * 25);
-        updateJob(jobId, { progress: uploadProgress });
+        const estD = progressEstRef.current[jobId];
+        if (estD) {
+          const d = segment.duration || (segment.end - segment.start) || 0;
+          estD.processedSeconds = Math.min(estD.totalSeconds, estD.processedSeconds + Math.max(d, 0));
+          safeUpdateJobProgress(jobId, estD.processedSeconds, estD.totalSeconds, '語音轉文字處理中');
+        }
 
         await new Promise(resolve => setTimeout(resolve, 1500));
 
@@ -1283,8 +1925,26 @@ const App: React.FC = () => {
       const combinedTranscriptRaw = transcriptSegments.join('\n\n');
       console.log('Gemini 逐字稿合併完成');
 
-      const parsedResult = geminiClient.parseTranscriptionResult(combinedTranscriptRaw);
-      updateJob(jobId, { progress: 80 });
+      const cleanedTranscript = await cleanupTranscriptInChunks(
+        geminiClient,
+        combinedTranscriptRaw,
+        settings.customTranscriptCleanupPrompt
+      );
+
+      const parsedResult = geminiClient.parseTranscriptionResult(cleanedTranscript);
+      // 逐字稿一律簡轉繁（台灣）
+      try {
+        const { toTW } = await import('./utils/zhConvert');
+        parsedResult.transcript.fullText = await toTW(parsedResult.transcript.fullText);
+      } catch {}
+      const estAfter = progressEstRef.current[jobId];
+      if (estAfter) safeUpdateJobProgress(jobId, Math.max(estAfter.processedSeconds, estAfter.totalSeconds * 0.9), estAfter.totalSeconds, '逐字稿修正中');
+      const geminiSegments = mergeSegmentsWithCleanTranscript(
+        Array.isArray(parsedResult.transcript?.segments)
+          ? (parsedResult.transcript.segments as TranscriptSegment[])
+          : [],
+        parsedResult.transcript.fullText
+      );
       
       // 4. 後處理：應用詞彙表修正（雙重保險）
       if (settings.vocabularyList && settings.vocabularyList.length > 0) {
@@ -1297,6 +1957,12 @@ const App: React.FC = () => {
       
       // 5. 第二步：生成自訂會議總結（如果有自訂摘要提示詞）
       let finalSummary = parsedResult.summary;
+      // 若存在預設摘要，先做簡轉繁處理（minutesMd 與 overallSummary）
+      try {
+        const { toTW } = await import('./utils/zhConvert');
+        if (finalSummary?.minutesMd) finalSummary.minutesMd = await toTW(finalSummary.minutesMd);
+        if (finalSummary?.overallSummary) finalSummary.overallSummary = await toTW(finalSummary.overallSummary);
+      } catch {}
       if (settings.customSummaryPrompt) {
         setRecordingStatus('逐字稿完成，等待後再生成自訂摘要...');
         
@@ -1305,10 +1971,15 @@ const App: React.FC = () => {
         setRecordingStatus('開始生成自訂摘要...');
         
         try {
-          const customSummaryResult = await geminiClient.generateCustomSummary(
+          let customSummaryResult = await geminiClient.generateCustomSummary(
             parsedResult.transcript.fullText,
             settings.customSummaryPrompt
           );
+          // 自訂摘要也轉繁
+          try {
+            const { toTW } = await import('./utils/zhConvert');
+            customSummaryResult = await toTW(customSummaryResult);
+          } catch {}
           console.log('Gemini 自訂摘要完成:', customSummaryResult);
           
           // 用自訂摘要替換原來的摘要
@@ -1322,20 +1993,21 @@ const App: React.FC = () => {
           // 如果自訂摘要失敗，繼續使用原來的摘要
         }
       }
+      // 6. 更新作業狀態為完成（逐字稿段落轉繁）
+      let twSegments = geminiSegments;
+      try {
+        const { toTW } = await import('./utils/zhConvert');
+        twSegments = await Promise.all(
+          geminiSegments.map(async (seg) => ({ ...seg, text: await toTW(seg.text || '') }))
+        );
+      } catch {}
+      updateJob(jobId, { status: 'done', transcript: parsedResult.transcript.fullText, transcriptSegments: twSegments, summary: finalSummary.minutesMd });
+      if (estAfter) safeUpdateJobProgress(jobId, estAfter.totalSeconds, estAfter.totalSeconds, '完成');
       
-      // 6. 更新作業狀態為完成
-      updateJob(jobId, {
-        status: 'done',
-        progress: 100,
-        transcript: parsedResult.transcript.fullText,
-        summary: finalSummary.minutesMd
-      });
-      
-      setRecordingStatus('Gemini 轉錄完成！可到「任務」或「結果」頁面查看');
+      setRecordingStatus('Gemini 轉錄完成！可在結果頁查看詳細內容');
       
     } catch (error) {
       console.error('Gemini 轉錄失敗:', error);
-      updateJob(jobId, { status: 'failed' });
 
       // 改進錯誤訊息，提供更具體的指導
       let errorMessage = '';
@@ -1379,20 +2051,33 @@ const App: React.FC = () => {
             '確認防火牆設定',
             '嘗試重新連接網路'
           ];
+      } else {
+        errorMessage = errorMsg;
+        if (/INVALID_ARGUMENT/i.test(errorMsg)) {
+          suggestions = [
+            '確認未在非 chirp_3 模型啟用說話者分段（Diarization）',
+            '若需 Diarization，請將模型設為 chirp_3 並使用語言 cmn-Hans-CN',
+            '或先關閉 Diarization 僅保留字詞時間戳（Word Offsets）',
+          ];
         } else {
-          errorMessage = errorMsg;
           suggestions = [
             '檢查網路連接和 API 設定',
             '查看詳細錯誤日誌',
             '嘗試重新啟動應用程式'
           ];
         }
+      }
       } else {
         errorMessage = '未知錯誤';
         suggestions = ['請重試或聯繫技術支援'];
       }
 
       const fullMessage = `❌ ${errorMessage}\n\n💡 建議解決方案:\n${suggestions.map(s => `• ${s}`).join('\n')}`;
+      updateJob(jobId, {
+        status: 'failed',
+        errorMessage,
+        progressMessage: fullMessage
+      });
       setRecordingStatus(fullMessage);
 
       // 記錄錯誤到控制台，便於調試
@@ -1451,24 +2136,19 @@ const App: React.FC = () => {
     try {
       console.log('開始處理上傳檔案:', file.name, file.type, file.size);
       
-      // 檢查檔案大小（與 validateAudioFile 保持一致，限制 500MB）
-      const maxSize = 500 * 1024 * 1024; // 500MB
-      if (file.size > maxSize) {
-        alert('檔案太大！請選擇小於 500MB 的音訊檔案。');
+      const validation = validateMediaFile(file);
+      if (!validation.isValid) {
+        const message = Object.values(validation.errors).join('\n');
+        alert(message || '檔案驗證失敗，請重新選擇檔案。');
+        setRecordingStatus(message || '媒體檔案驗證失敗');
         return;
       }
-      
-      // 檢查檔案類型
-      const allowedTypes = ['audio/mp3', 'audio/wav', 'audio/m4a', 'audio/webm', 'audio/ogg', 'audio/mpeg'];
-      if (!allowedTypes.includes(file.type) && !file.type.startsWith('audio/')) {
-        alert('不支援的檔案格式！請選擇音訊檔案。');
-        return;
-      }
-      
+
       setRecordingStatus(`正在處理檔案: ${file.name}...`);
       
       // 將 File 轉換為 Blob
-      const fileBlob = new Blob([file], { type: file.type });
+      const normalizedType = normalizeMimeType(file.type) || inferMimeFromExtension(file.name) || file.type || 'audio/m4a';
+      const fileBlob = new Blob([file], { type: normalizedType });
       const estimatedDuration = await getBlobDuration(fileBlob).catch(() => 0);
       
       // 直接啟動轉錄流程
@@ -1491,19 +2171,18 @@ const App: React.FC = () => {
         (status) => {
           console.log('狀態更新:', status);
           
+          const progressMessage = JOB_STATUS_HINTS[status.status] || recordingStatus;
+          const progressValue = status.progress ?? 0;
+
           // 更新作業狀態
-          updateJob(jobId, { status: status.status, progress: status.progress || 0 });
+          updateJob(jobId, {
+            status: status.status,
+            progress: progressValue,
+            progressMessage
+          });
           
           // 更新錄音狀態顯示
-          const statusMap = {
-            queued: '排隊中...',
-            stt: '語音轉文字中...',
-            summarize: '生成摘要中...',
-            done: '轉錄完成！',
-            failed: '轉錄失敗'
-          };
-          
-          setRecordingStatus(`${statusMap[status.status]} (${status.progress || 0}%)`);
+          setRecordingStatus(progressMessage);
         },
         2000, // 每2秒輪詢一次
         150   // 最多5分鐘
@@ -1513,833 +2192,833 @@ const App: React.FC = () => {
       const result = await api.getMeetingResult(meetingId);
       console.log('轉錄結果:', result);
       
-      // 更新作業結果
+      // 更新作業結果（統一轉為繁體）
+      let minutesMd = result.summary?.minutesMd || '';
+      let transcriptText = result.transcript?.segments?.map(s => s.text).join('\n') || '';
+      let transcriptSegments = result.transcript?.segments || [];
+      try {
+        const { toTW } = await import('./utils/zhConvert');
+        minutesMd = await toTW(minutesMd);
+        transcriptText = await toTW(transcriptText);
+        transcriptSegments = await Promise.all(
+          (transcriptSegments || []).map(async (s: any) => ({ ...s, text: await toTW(s.text || '') }))
+        );
+      } catch {}
+
       updateJob(jobId, {
-        transcript: result.transcript?.segments?.map(s => s.text).join('\n') || '',
-        transcriptSegments: result.transcript?.segments || [],
-        summary: result.summary?.minutesMd || ''
+        transcript: transcriptText,
+        transcriptSegments,
+        summary: minutesMd,
+        status: 'done',
+        progress: 100,
+        progressMessage: JOB_STATUS_HINTS.done
       });
       
-      setRecordingStatus('轉錄完成！可到「任務」或「結果」頁面查看');
+      setRecordingStatus('轉錄完成！可在結果頁查看詳細內容');
       
     } catch (error) {
       console.error('狀態輪詢失敗:', error);
-      updateJob(jobId, { status: 'failed' });
-      setRecordingStatus('轉錄處理失敗: ' + (error as Error).message);
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      updateJob(jobId, {
+        status: 'failed',
+        errorMessage,
+        progressMessage: `${JOB_STATUS_HINTS.failed}：${errorMessage}`
+      });
+      setRecordingStatus('轉錄處理失敗: ' + errorMessage);
     }
   };
 
   const renderCurrentPage = () => {
     switch (currentPage) {
-      case 'record':
-        return (
-          <div style={{ textAlign: 'center', minWidth: '500px' }}>
-            <h2 style={{ color: '#111827', marginBottom: '1rem' }}>錄音頁面</h2>
-            
-            {/* Status Display */}
-            <div style={{
-              marginBottom: '1.5rem',
-              padding: '1rem',
-              backgroundColor: hasAudioPermission === false ? '#fef2f2' : hasAudioPermission === true ? '#f0f9ff' : '#fffbeb',
-              borderRadius: '8px',
-              border: `1px solid ${hasAudioPermission === false ? '#fecaca' : hasAudioPermission === true ? '#bae6fd' : '#fed7aa'}`
-            }}>
-              <div style={{ 
-                color: hasAudioPermission === false ? '#dc2626' : hasAudioPermission === true ? '#0369a1' : '#d97706',
-                fontWeight: 'bold',
-                marginBottom: '0.5rem'
-              }}>
-                {hasAudioPermission === false ? '⚠️ 權限問題' : 
-                 hasAudioPermission === true ? '✅ 準備就緒' : 
-                 '🔍 檢查中'}
-              </div>
-              <div style={{ fontSize: '14px', color: '#6b7280' }}>
-                {recordingStatus}
-              </div>
-            </div>
+      case 'record': {
+        const permissionState = hasAudioPermission === false ? 'danger' : hasAudioPermission === true ? 'success' : 'warning';
 
-            {/* Recording Interface */}
-            {isRecording ? (
-              <>
-                <div style={{ 
-                  marginBottom: '1rem',
-                  padding: '1rem',
-                  backgroundColor: '#fef2f2',
-                  borderRadius: '8px',
-                  border: '1px solid #fecaca'
-                }}>
-                  <div style={{ 
-                    display: 'flex', 
-                    alignItems: 'center', 
-                    justifyContent: 'center',
-                    marginBottom: '0.5rem'
-                  }}>
-                    <div style={{
-                      width: '12px',
-                      height: '12px',
-                      backgroundColor: '#dc2626',
-                      borderRadius: '50%',
-                      marginRight: '8px',
-                      animation: 'pulse 1.5s ease-in-out infinite'
-                    }}></div>
-                    <span style={{ color: '#dc2626', fontWeight: 'bold' }}>錄音中...</span>
-                  </div>
-                  <div style={{ 
-                    fontSize: '24px', 
-                    fontWeight: 'bold', 
-                    color: '#111827',
-                    fontFamily: 'monospace'
-                  }}>
-                    {formatTime(recordingTime)}
-                  </div>
-                </div>
-                
-                <button 
-                  onClick={stopRecording}
-                  style={{
-                    padding: '12px 24px',
-                    backgroundColor: '#6b7280',
-                    color: 'white',
-                    borderRadius: '8px',
-                    border: 'none',
-                    cursor: 'pointer',
-                    fontSize: '16px'
-                  }}
-                >
-                  ⏹️ 停止錄音
-                </button>
-              </>
-            ) : (
-              <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem', alignItems: 'center' }}>
-                {/* 錄音模式選擇 */}
-                <div style={{
-                  padding: '1.5rem',
-                  backgroundColor: '#f8fafc',
-                  borderRadius: '8px',
-                  border: '1px solid #e2e8f0',
-                  width: '100%',
-                  maxWidth: '500px'
-                }}>
-                  <h3 style={{ color: '#1f2937', marginBottom: '1rem', fontSize: '16px', textAlign: 'center' }}>
-                    🎯 會議錄音模式
-                  </h3>
-                  <div style={{ display: 'flex', flexDirection: 'column', gap: '0.75rem' }}>
-                    <label style={{
-                      display: 'flex',
-                      alignItems: 'center',
-                      padding: '0.75rem',
-                      backgroundColor: recordingMode === 'both' ? '#dbeafe' : 'white',
-                      border: recordingMode === 'both' ? '2px solid #3b82f6' : '1px solid #d1d5db',
-                      borderRadius: '6px',
-                      cursor: 'pointer',
-                      transition: 'all 0.2s'
-                    }}>
-                      <input
-                        type="radio"
-                        name="recordingMode"
-                        value="both"
-                        checked={recordingMode === 'both'}
-                        onChange={(e) => setRecordingMode(e.target.value as any)}
-                        style={{ marginRight: '0.75rem' }}
-                      />
-                      <div>
-                        <div style={{ fontWeight: '500', color: '#111827' }}>
-                          🔥 混合模式 (推薦)
-                        </div>
-                        <div style={{ fontSize: '12px', color: '#6b7280' }}>
-                          同時錄製系統聲音和麥克風，適合大部分會議場景
-                        </div>
-                      </div>
-                    </label>
-                    
-                    <label style={{
-                      display: 'flex',
-                      alignItems: 'center',
-                      padding: '0.75rem',
-                      backgroundColor: recordingMode === 'system' ? '#dbeafe' : 'white',
-                      border: recordingMode === 'system' ? '2px solid #3b82f6' : '1px solid #d1d5db',
-                      borderRadius: '6px',
-                      cursor: 'pointer',
-                      transition: 'all 0.2s'
-                    }}>
-                      <input
-                        type="radio"
-                        name="recordingMode"
-                        value="system"
-                        checked={recordingMode === 'system'}
-                        onChange={(e) => setRecordingMode(e.target.value as any)}
-                        style={{ marginRight: '0.75rem' }}
-                      />
-                      <div>
-                        <div style={{ fontWeight: '500', color: '#111827' }}>
-                          🔊 系統聲音
-                        </div>
-                        <div style={{ fontSize: '12px', color: '#6b7280' }}>
-                          只錄製系統播放的聲音，適合線上會議錄製
-                        </div>
-                      </div>
-                    </label>
-                    
-                    <label style={{
-                      display: 'flex',
-                      alignItems: 'center',
-                      padding: '0.75rem',
-                      backgroundColor: recordingMode === 'microphone' ? '#dbeafe' : 'white',
-                      border: recordingMode === 'microphone' ? '2px solid #3b82f6' : '1px solid #d1d5db',
-                      borderRadius: '6px',
-                      cursor: 'pointer',
-                      transition: 'all 0.2s'
-                    }}>
-                      <input
-                        type="radio"
-                        name="recordingMode"
-                        value="microphone"
-                        checked={recordingMode === 'microphone'}
-                        onChange={(e) => setRecordingMode(e.target.value as any)}
-                        style={{ marginRight: '0.75rem' }}
-                      />
-                      <div>
-                        <div style={{ fontWeight: '500', color: '#111827' }}>
-                          🎤 麥克風
-                        </div>
-                        <div style={{ fontSize: '12px', color: '#6b7280' }}>
-                          只錄製麥克風輸入，適合單人錄音或訪談
-                        </div>
-                      </div>
-                    </label>
-                  </div>
-                </div>
-                
-                <div style={{ display: 'flex', gap: '10px', flexWrap: 'wrap' }}>
-                  {hasAudioPermission !== true && (
-                    <button 
-                      onClick={testAudioAccess}
-                      style={{
-                        padding: '10px 20px',
-                        backgroundColor: '#2563eb',
-                        color: 'white',
-                        borderRadius: '6px',
-                        border: 'none',
-                        cursor: 'pointer',
-                        fontSize: '14px'
-                      }}
-                    >
-                      🎤 測試麥克風權限
-                    </button>
-                  )}
-                  
-                  <button 
-                    onClick={testSystemAudioAccess}
-                    style={{
-                      padding: '10px 20px',
-                      backgroundColor: '#16a34a',
-                      color: 'white',
-                      borderRadius: '6px',
-                      border: 'none',
-                      cursor: 'pointer',
-                      fontSize: '14px'
-                    }}
-                  >
-                    🔊 測試系統聲音權限
-                  </button>
-                </div>
-                
-                <button 
-                  onClick={startRecording}
-                  disabled={hasAudioPermission === false}
-                  style={{
-                    padding: '12px 24px',
-                    backgroundColor: hasAudioPermission === false ? '#9ca3af' : '#dc2626',
-                    color: 'white',
-                    borderRadius: '8px',
-                    border: 'none',
-                    cursor: hasAudioPermission === false ? 'not-allowed' : 'pointer',
-                    fontSize: '16px',
-                    fontWeight: 'bold'
-                  }}
-                >
-                  🔴 開始會議錄音
-                </button>
-                
-                <div style={{ fontSize: '12px', color: '#6b7280', textAlign: 'center', maxWidth: '400px' }}>
-                  <strong>提示：</strong>
-                  {recordingMode === 'both' && '混合模式會要求螢幕分享權限來錄製系統聲音，並要求麥克風權限'}
-                  {recordingMode === 'system' && '系統聲音模式會要求螢幕分享權限來錄製應用程式音訊'}
-                  {recordingMode === 'microphone' && '麥克風模式只需要麥克風權限，適合個人錄音'}
-                </div>
-              </div>
-            )}
+        const latestJob = jobs[0];
+        const activeJob = jobs.find(job => job.status !== 'done' && job.status !== 'failed');
+        const failedJob = latestJob && latestJob.status === 'failed' ? latestJob : null;
+        const completedJob = latestJob && latestJob.status === 'done' ? latestJob : null;
 
-            {/* 檔案上傳區 */}
-            <div style={{ 
-              marginTop: '2rem', 
-              padding: '1.5rem',
-              border: '2px dashed #d1d5db',
-              borderRadius: '8px',
-              backgroundColor: '#fafafa',
-              textAlign: 'center'
-            }}>
-              <h3 style={{ color: '#111827', marginBottom: '1rem', fontSize: '16px' }}>
-                📁 上傳音訊檔案進行轉錄
-              </h3>
-              <input
-                type="file"
-                accept="audio/*"
-                onChange={(e) => {
-                  const file = e.target.files?.[0];
-                  if (file) {
-                    handleFileUpload(file);
-                  }
-                }}
-                style={{
-                  marginBottom: '1rem',
-                  padding: '0.5rem',
-                  border: '1px solid #d1d5db',
-                  borderRadius: '4px',
-                  backgroundColor: 'white'
-                }}
-              />
-              <div style={{ fontSize: '12px', color: '#6b7280' }}>
-                支援格式：MP3, WAV, M4A, WebM 等音訊格式
-              </div>
-            </div>
+        let bannerVariant: 'success' | 'warning' | 'danger' | 'info' = permissionState;
+        let bannerIcon: React.ReactNode = permissionState === 'danger'
+          ? <Icon name="warning" />
+          : hasAudioPermission === true
+            ? <Icon name="success" />
+            : <Icon name="info" />;
+        let bannerTitle = permissionState === 'danger' ? '權限問題' : hasAudioPermission === true ? '裝置準備就緒' : '權限檢查中';
+        let bannerDesc = recordingStatus;
+        let bannerProgress: number | null = null;
 
-            {/* 錄音列表 */}
-            {recordings.length > 0 && (
-              <div style={{ marginTop: '2rem', textAlign: 'left' }}>
-                <h3 style={{ color: '#111827', marginBottom: '1rem', textAlign: 'center' }}>
-                  錄音檔案 ({recordings.length})
-                </h3>
-                
-                <div style={{ 
-                  maxHeight: '300px', 
-                  overflowY: 'auto',
-                  border: '1px solid #e5e7eb',
-                  borderRadius: '8px',
-                  backgroundColor: '#fafafa'
-                }}>
-                  {recordings.map((recording, index) => (
-                    <div key={recording.id} style={{
-                      padding: '1rem',
-                      borderBottom: index < recordings.length - 1 ? '1px solid #e5e7eb' : 'none',
-                      display: 'flex',
-                      justifyContent: 'space-between',
-                      alignItems: 'center'
-                    }}>
-                      <div style={{ flex: 1 }}>
-                        <div style={{ fontWeight: 'bold', color: '#111827', marginBottom: '0.25rem' }}>
-                          {recording.filename}
-                        </div>
-                        <div style={{ fontSize: '12px', color: '#6b7280' }}>
-                          {recording.timestamp} · {formatTime(recording.duration)} · {(recording.size / 1024).toFixed(1)} KB
-                        </div>
-                      </div>
-                      
-                      <div style={{ display: 'flex', gap: '0.5rem', marginLeft: '1rem' }}>
-                        <button
-                          onClick={() => {
-                            // 啟動轉錄流程
-                            startTranscriptionJob(recording.blob, recording.filename, recording.chunks || [], recording.duration);
-                          }}
-                          style={{
-                            padding: '8px 16px',
-                            backgroundColor: '#8b5cf6',
-                            color: 'white',
-                            border: 'none',
-                            borderRadius: '6px',
-                            cursor: 'pointer',
-                            fontSize: '14px',
-                            fontWeight: '500'
-                          }}
-                          title="開始轉錄這個錄音檔案"
-                        >
-                          🎯 開始轉錄
-                        </button>
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              </div>
-            )}
-          </div>
-        );
-      case 'jobs':
-        return (
-          <div style={{ textAlign: 'left', minWidth: '600px' }}>
-            <h2 style={{ color: '#111827', marginBottom: '1rem', textAlign: 'center' }}>轉錄任務</h2>
-            
-            {jobs.length === 0 ? (
-              <div style={{ textAlign: 'center', padding: '2rem', color: '#6b7280' }}>
-                目前沒有轉錄任務
-              </div>
-            ) : (
-              <div style={{ 
-                maxHeight: '400px', 
-                overflowY: 'auto',
-                border: '1px solid #e5e7eb',
-                borderRadius: '8px',
-                backgroundColor: '#fafafa'
-              }}>
-                {jobs.map((job, index) => {
-                  const statusColors = {
-                    queued: { bg: '#fef3c7', border: '#fed7aa', text: '#92400e' },
-                    stt: { bg: '#dbeafe', border: '#bae6fd', text: '#1e40af' },
-                    summarize: { bg: '#e9d5ff', border: '#d8b4fe', text: '#7c3aed' },
-                    done: { bg: '#d1fae5', border: '#a7f3d0', text: '#065f46' },
-                    failed: { bg: '#fee2e2', border: '#fecaca', text: '#991b1b' }
-                  };
-                  
-                  const statusLabels = {
-                    queued: '📋 排隊中',
-                    stt: '🎤 語音轉文字中',
-                    summarize: '📝 生成摘要中',
-                    done: '✅ 完成',
-                    failed: '❌ 失敗'
-                  };
-                  
-                  const statusColor = statusColors[job.status];
-                  
-                  return (
-                    <div key={job.id} style={{
-                      padding: '1rem',
-                      borderBottom: index < jobs.length - 1 ? '1px solid #e5e7eb' : 'none',
-                      display: 'flex',
-                      flexDirection: 'column',
-                      gap: '0.5rem'
-                    }}>
-                      {/* 任務標題和狀態 */}
-                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                        <div style={{ fontWeight: 'bold', color: '#111827' }}>
-                          {job.filename}
-                        </div>
-                        <div style={{
-                          padding: '4px 12px',
-                          borderRadius: '12px',
-                          fontSize: '12px',
-                          fontWeight: '500',
-                          backgroundColor: statusColor.bg,
-                          color: statusColor.text,
-                          border: `1px solid ${statusColor.border}`
-                        }}>
-                          {statusLabels[job.status]}
-                        </div>
-                      </div>
-                      
-                      {/* 進度條 */}
-                      {job.status !== 'done' && job.status !== 'failed' && (
-                        <div style={{ 
-                          width: '100%',
-                          height: '8px',
-                          backgroundColor: '#e5e7eb',
-                          borderRadius: '4px',
-                          overflow: 'hidden'
-                        }}>
-                          <div style={{
-                            height: '100%',
-                            width: `${job.progress}%`,
-                            backgroundColor: '#3b82f6',
-                            borderRadius: '4px',
-                            transition: 'width 0.3s ease'
-                          }}></div>
-                        </div>
-                      )}
-                      
-                      {/* 時間和進度百分比 */}
-                      <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '12px', color: '#6b7280' }}>
-                        <span>創建時間: {job.createdAt}</span>
-                        <span>進度: {job.progress}%</span>
-                      </div>
-                      
-                      {/* 完成後的操作按鈕 */}
-                      {job.status === 'done' && (
-                        <div style={{ display: 'flex', gap: '0.5rem', marginTop: '0.5rem' }}>
-                          <button
-                            onClick={() => setCurrentPage('result')}
-                            style={{
-                              padding: '6px 12px',
-                              backgroundColor: '#10b981',
-                              color: 'white',
-                              border: 'none',
-                              borderRadius: '4px',
-                              cursor: 'pointer',
-                              fontSize: '12px'
-                            }}
-                          >
-                            📄 查看結果
-                          </button>
-                        </div>
-                      )}
-                    </div>
-                  );
-                })}
-              </div>
-            )}
-          </div>
-        );
-      case 'result':
-        const completedJobs = jobs.filter(job => job.status === 'done' && (job.transcript || job.summary));
-        
-        if (completedJobs.length === 0) {
-          return (
-            <div style={{ 
-              textAlign: 'center', 
-              padding: '4rem', 
-              color: '#6b7280', 
-              minWidth: '800px',
-              maxWidth: '1200px',
-              margin: '0 auto'
-            }}>
-              <div style={{ fontSize: '3rem', marginBottom: '1rem' }}>📄</div>
-              <h2 style={{ color: '#111827', marginBottom: '1rem' }}>暫無完成的轉錄結果</h2>
-              <p>完成轉錄後結果會顯示在這裡</p>
-            </div>
-          );
+        if (hasAudioPermission === false) {
+          bannerVariant = 'danger';
+          bannerIcon = <Icon name="warning" />;
+          bannerTitle = '麥克風權限被拒絕';
+          bannerDesc = '請前往系統設定 > 隱私權與安全性 > 麥克風，允許此應用使用麥克風。';
+        } else if (activeJob) {
+          bannerVariant = 'info';
+          bannerIcon = <Icon name="info" />;
+          bannerTitle = `正在處理：${activeJob.filename}`;
+          const hint = activeJob.progressMessage || JOB_STATUS_HINTS[activeJob.status] || '任務處理中';
+          bannerDesc = hint;
+          const progressValue = activeJob.progress ?? 0;
+          bannerProgress = Math.max(8, Math.min(100, progressValue));
+        } else if (failedJob) {
+          bannerVariant = 'danger';
+          bannerIcon = <Icon name="error" />;
+          bannerTitle = `處理失敗：${failedJob.filename}`;
+          const message = failedJob.progressMessage || failedJob.errorMessage || JOB_STATUS_HINTS.failed;
+          bannerDesc = message;
+        } else if (completedJob) {
+          bannerVariant = 'success';
+          bannerIcon = <Icon name="success" />;
+          bannerTitle = `轉錄完成：${completedJob.filename}`;
+          bannerDesc = completedJob.progressMessage || JOB_STATUS_HINTS.done;
+        } else if (hasAudioPermission === null) {
+          bannerVariant = 'warning';
+          bannerIcon = <Icon name="info" />;
+          bannerTitle = '權限檢查中';
+          bannerDesc = '正在檢查麥克風權限...';
+        } else {
+          bannerVariant = 'success';
+          bannerIcon = <Icon name="success" />;
+          bannerTitle = '裝置準備就緒';
+          bannerDesc = recordingStatus || '已獲得麥克風權限，準備就緒';
         }
 
-        const currentJob = completedJobs[currentJobIndex];
-        const totalPages = completedJobs.length;
+        const recordModes: Array<{ id: typeof recordingMode; title: string; description: string }> = [
+          { id: 'both', title: '混合模式 (推薦)', description: '同時錄製系統音訊與麥克風，適合線上會議' },
+          { id: 'system', title: '系統聲音', description: '僅擷取系統播放的聲音，適合線上會議' },
+          { id: 'microphone', title: '麥克風', description: '僅擷取麥克風輸入，適合訪談或現場記錄' }
+        ];
+
+        const currentTask = jobs[0];
+        const completedJobs = jobs.filter(job => job.status === 'done').slice(0, 2);
+
+        const timelineSteps: Array<{ key: MeetingStatus; label: string }> = [
+          { key: 'queued', label: '排隊' },
+          { key: 'stt', label: '語音轉文字' },
+          { key: 'summarize', label: '摘要生成' },
+          { key: 'done', label: '完成' }
+        ];
+
+        const renderRecordingSession = () => (
+          <div className="recording-session">
+            <div className="recording-session__badge">
+              <span className="recording-session__dot" />
+              <span>錄音進行中</span>
+            </div>
+            <div className="recording-session__time">{formatTime(recordingTime)}</div>
+            <div className="recording-session__buttons">
+              <button onClick={stopRecording} className="btn btn--surface btn--xl">停止錄音</button>
+              <button onClick={cancelRecording} className="btn btn--danger btn--xl">取消錄音</button>
+            </div>
+            <p className="recording-session__hint">取消後本段錄音不會保存或進行轉錄。</p>
+          </div>
+        );
+
+        const handleRetryJob = async (job: typeof jobs[number]) => {
+          // 1) 若本機暫存錄音存在於記憶列表，直接使用
+          const draft = recordings.find(r => r.filename === job.filename);
+          if (draft) {
+            startTranscriptionJob(draft.blob, draft.filename, draft.chunks || [], draft.duration, { sourcePath: draft.filePath });
+            return;
+          }
+
+          // 2) 嘗試用作業記錄中的 audioFile 重新讀取
+          if (job.audioFile) {
+            try {
+              const existsRes = await window.electronAPI.recording.fileExists(job.audioFile);
+              if (existsRes?.success && existsRes.exists) {
+                const readRes = await window.electronAPI.recording.readFile(job.audioFile);
+                if (readRes?.success && readRes.buffer) {
+                  const extMime = inferMimeFromExtension(job.filename) || inferMimeFromExtension(job.audioFile) || 'audio/wav';
+                  const blob = new Blob([readRes.buffer], { type: extMime });
+                  const duration = await getBlobDuration(blob).catch(() => 0);
+                  startTranscriptionJob(blob, job.filename, [], duration || recordingTime, { sourcePath: job.audioFile });
+                  return;
+                }
+              }
+            } catch {}
+          }
+
+          // 3) 找不到或已被清理：請使用者手動選擇原始檔案
+          const pick = await (window.electronAPI as any)?.dialog?.openFile?.();
+          if (pick && !pick.canceled && pick.filePath) {
+            try {
+              const readRes = await window.electronAPI.recording.readFile(pick.filePath);
+              if (readRes?.success && readRes.buffer) {
+                const chosenName = pick.filePath.split(/[\\/]/).pop() || job.filename;
+                const extMime = inferMimeFromExtension(chosenName) || 'audio/wav';
+                const blob = new Blob([readRes.buffer], { type: extMime });
+                const duration = await getBlobDuration(blob).catch(() => 0);
+                startTranscriptionJob(blob, chosenName, [], duration || recordingTime, { sourcePath: pick.filePath });
+                return;
+              }
+            } catch (e) {
+              console.error('讀取手動選擇的檔案失敗:', e);
+            }
+          }
+
+          alert('找不到原始錄音檔案，請重新錄製或上傳。');
+        };
 
         return (
-          <div style={{ 
-            padding: '1rem',
-            width: '100%',
-            height: '100vh',
-            overflow: 'hidden',
-            display: 'flex',
-            flexDirection: 'column'
-          }}>
-            {/* 頂部控制行 */}
-            <div style={{ 
-              display: 'flex', 
-              justifyContent: 'space-between', 
-              alignItems: 'center', 
-              marginBottom: '1rem',
-              flexShrink: 0
-            }}>
-              <div style={{ display: 'flex', alignItems: 'center', gap: '1rem' }}>
-                <h1 style={{ color: '#111827', fontSize: '1.25rem', margin: 0 }}>
-                  📄 會議轉錄結果
-                </h1>
-                
-                {/* 顯示模式切換按鈕 */}
-                <div style={{ display: 'flex', border: '1px solid #d1d5db', borderRadius: '6px', overflow: 'hidden' }}>
-                  <button
-                    onClick={() => setResultViewMode('summary')}
-                    style={{
-                      padding: '0.5rem 1rem',
-                      backgroundColor: resultViewMode === 'summary' ? '#3b82f6' : 'white',
-                      color: resultViewMode === 'summary' ? 'white' : '#374151',
-                      border: 'none',
-                      cursor: 'pointer',
-                      fontSize: '0.875rem',
-                      fontWeight: '500'
-                    }}
-                  >
-                    📊 會議總結
-                  </button>
-                  <button
-                    onClick={() => setResultViewMode('transcript')}
-                    style={{
-                      padding: '0.5rem 1rem',
-                      backgroundColor: resultViewMode === 'transcript' ? '#3b82f6' : 'white',
-                      color: resultViewMode === 'transcript' ? 'white' : '#374151',
-                      border: 'none',
-                      borderLeft: '1px solid #d1d5db',
-                      cursor: 'pointer',
-                      fontSize: '0.875rem',
-                      fontWeight: '500'
-                    }}
-                  >
-                    📝 完整逐字稿
-                  </button>
-                </div>
-              </div>
-              
-              {/* 分頁導航 */}
-              <div style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', gap: '0.5rem' }}>
-                <button
-                  onClick={() => setCurrentJobIndex(Math.max(0, currentJobIndex - 1))}
-                  disabled={currentJobIndex === 0}
-                  style={{
-                    padding: '0.5rem',
-                    backgroundColor: currentJobIndex === 0 ? '#f3f4f6' : '#e5e7eb',
-                    color: currentJobIndex === 0 ? '#9ca3af' : '#374151',
-                    border: 'none',
-                    borderRadius: '4px',
-                    cursor: currentJobIndex === 0 ? 'not-allowed' : 'pointer'
-                  }}
-                >
-                  ◀
-                </button>
-                
-                {Array.from({ length: totalPages }, (_, i) => (
-                  <button
-                    key={i}
-                    onClick={() => setCurrentJobIndex(i)}
-                    style={{
-                      padding: '0.5rem 0.75rem',
-                      backgroundColor: i === currentJobIndex ? '#3b82f6' : 'white',
-                      color: i === currentJobIndex ? 'white' : '#374151',
-                      border: '1px solid #d1d5db',
-                      borderRadius: '4px',
-                      cursor: 'pointer',
-                      minWidth: '40px'
-                    }}
-                  >
-                    {i + 1}
-                  </button>
-                ))}
-                
-                <button
-                  onClick={() => setCurrentJobIndex(Math.min(totalPages - 1, currentJobIndex + 1))}
-                  disabled={currentJobIndex === totalPages - 1}
-                  style={{
-                    padding: '0.5rem',
-                    backgroundColor: currentJobIndex === totalPages - 1 ? '#f3f4f6' : '#e5e7eb',
-                    color: currentJobIndex === totalPages - 1 ? '#9ca3af' : '#374151',
-                    border: 'none',
-                    borderRadius: '4px',
-                    cursor: currentJobIndex === totalPages - 1 ? 'not-allowed' : 'pointer'
-                  }}
-                >
-                  ▶
-                </button>
-              </div>
-            </div>
-
-            {/* 檔案信息條 - 更緊湊 */}
-            <div style={{
-              marginBottom: '0.75rem',
-              padding: '0.4rem 0.8rem',
-              backgroundColor: '#f8fafc',
-              borderRadius: '4px',
-              border: '1px solid #e2e8f0',
-              display: 'flex',
-              justifyContent: 'space-between',
-              alignItems: 'center',
-              fontSize: '0.8rem',
-              flexShrink: 0
-            }}>
-              <span style={{ fontWeight: '500', color: '#1f2937' }}>
-                📁 {currentJob.filename}
-              </span>
-              <span style={{ color: '#6b7280' }}>
-                {currentJob.createdAt}
-              </span>
-            </div>
-
-            {/* 主要內容區域 - 全屏單項顯示 */}
-            <div style={{
-              flex: 1,
-              overflow: 'hidden',
-              minHeight: 0,
-              backgroundColor: 'white',
-              borderRadius: '8px',
-              padding: '1.5rem',
-              boxShadow: '0 1px 3px rgba(0, 0, 0, 0.1)',
-              border: '1px solid #e5e7eb',
-              display: 'flex',
-              flexDirection: 'column'
-            }}>
-              {/* 內容區域 */}
-              <div style={{
-                flex: 1,
-                overflow: 'auto',
-                backgroundColor: '#fefefe',
-                padding: '1.5rem',
-                borderRadius: '6px',
-                border: '1px solid #e5e7eb'
-              }}>
-                {resultViewMode === 'summary' ? (
-                  // 會議總結模式
-                  currentJob.summary ? (
-                    <div style={{
-                      whiteSpace: 'pre-wrap',
-                      fontFamily: 'system-ui, -apple-system, sans-serif',
-                      lineHeight: '1.8',
-                      fontSize: '1rem',
-                      color: '#374151'
-                    }}>
-                      {currentJob.summary}
-                    </div>
-                  ) : (
-                    <div style={{ 
-                      textAlign: 'center', 
-                      padding: '4rem', 
-                      color: '#9ca3af',
-                      fontStyle: 'italic',
-                      fontSize: '1.1rem'
-                    }}>
-                      暫無會議總結內容
-                    </div>
-                  )
-                ) : (
-                  // 完整逐字稿模式
-                  currentJob.transcript ? (
-                    currentJob.transcriptSegments && currentJob.transcriptSegments.length > 0 ? (
-                      <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem' }}>
-                        {currentJob.transcriptSegments.map((segment, index) => {
-                          const startLabel = typeof segment.start === 'number'
-                            ? formatSecondsToTimestamp(segment.start)
-                            : segment.start ?? '--:--';
-                          const endLabel = typeof segment.end === 'number'
-                            ? formatSecondsToTimestamp(segment.end)
-                            : segment.end ?? '--:--';
-                          return (
-                          <div
-                            key={`${segment.start}-${segment.end}-${index}`}
-                            style={{
-                              backgroundColor: '#fff',
-                              border: '1px solid #e5e7eb',
-                              borderRadius: '6px',
-                              padding: '1rem',
-                              display: 'flex',
-                              gap: '1rem',
-                              alignItems: 'flex-start',
-                              boxShadow: '0 1px 2px rgba(15, 23, 42, 0.05)'
-                            }}
-                          >
-                            <div style={{
-                              minWidth: '100px',
-                              fontWeight: 600,
-                              color: '#1f2937'
-                            }}>
-                              {segment.speaker}
-                              <div style={{
-                                fontSize: '0.75rem',
-                                color: '#6b7280',
-                                marginTop: '0.25rem'
-                              }}>
-                                {startLabel} - {endLabel}
-                              </div>
-                            </div>
-                            <div style={{
-                              flex: 1,
-                              fontSize: '0.95rem',
-                              lineHeight: 1.7,
-                              color: '#111827'
-                            }}>
-                              {segment.text}
-                            </div>
-                          </div>
-                          );
-                        })}
-                      </div>
-                    ) : (
-                      <div style={{
-                        whiteSpace: 'pre-wrap',
-                        fontFamily: 'system-ui, -apple-system, sans-serif',
-                        lineHeight: '1.8',
-                        fontSize: '1rem',
-                        color: '#111827'
-                      }}>
-                        {currentJob.transcript}
-                      </div>
-                    )
-                  ) : (
-                    <div style={{ 
-                      textAlign: 'center', 
-                      padding: '4rem', 
-                      color: '#9ca3af',
-                      fontStyle: 'italic',
-                      fontSize: '1.1rem'
-                    }}>
-                      暫無完整逐字稿內容
-                    </div>
-                  )
+          <div className="record-dashboard">
+            <div className={`status-bar status-bar--${bannerVariant}`}>
+              <div className="status-bar__icon">{bannerIcon}</div>
+              <div className="status-bar__content">
+                <h1 className="status-bar__title">{bannerTitle}</h1>
+                <p className="status-bar__subtitle">{bannerDesc}</p>
+                {bannerProgress !== null && (
+                  <div className="status-progress">
+                    <div className="status-progress__bar" style={{ width: `${bannerProgress}%` }} />
+                  </div>
                 )}
               </div>
             </div>
 
-            {/* 底部操作按鈕 */}
-            <div style={{
-              display: 'flex',
-              justifyContent: 'center',
-              gap: '1rem',
-              marginTop: '0.75rem',
-              paddingTop: '0.5rem',
-              borderTop: '1px solid #e5e7eb',
-              flexShrink: 0
-            }}>
-              <button
-                onClick={() => {
-                  const content = `檔案：${currentJob.filename}\n完成時間：${currentJob.createdAt}\n\n${currentJob.summary ? '會議摘要：\n' + currentJob.summary + '\n\n' : ''}${currentJob.transcript ? '完整轉錄：\n' + currentJob.transcript : ''}`;
-                  navigator.clipboard.writeText(content);
-                  alert('已複製到剪貼板！');
-                }}
-                style={{
-                  padding: '0.75rem 1.5rem',
-                  backgroundColor: '#3b82f6',
-                  color: 'white',
-                  border: 'none',
-                  borderRadius: '6px',
-                  fontSize: '0.875rem',
-                  fontWeight: '500',
-                  cursor: 'pointer',
-                  display: 'flex',
-                  alignItems: 'center',
-                  gap: '0.5rem'
-                }}
-              >
-                📋 複製文本
-              </button>
-              
-              <button
-                onClick={() => {
-                  const element = document.createElement('a');
-                  const content = `檔案：${currentJob.filename}\n完成時間：${currentJob.createdAt}\n\n${currentJob.summary ? '會議摘要：\n' + currentJob.summary + '\n\n' : ''}${currentJob.transcript ? '完整轉錄：\n' + currentJob.transcript : ''}`;
-                  const file = new Blob([content], { type: 'text/plain; charset=utf-8' });
-                  element.href = URL.createObjectURL(file);
-                  element.download = `${currentJob.filename}_轉錄結果.txt`;
-                  document.body.appendChild(element);
-                  element.click();
-                  document.body.removeChild(element);
-                }}
-                style={{
-                  padding: '0.75rem 1.5rem',
-                  backgroundColor: '#10b981',
-                  color: 'white',
-                  border: 'none',
-                  borderRadius: '6px',
-                  fontSize: '0.875rem',
-                  fontWeight: '500',
-                  cursor: 'pointer',
-                  display: 'flex',
-                  alignItems: 'center',
-                  gap: '0.5rem'
-                }}
-              >
-                💾 下載文字檔 (TXT)
-              </button>
-              
-              <button
-                onClick={() => {
-                  if (confirm('確定要重新處理這個檔案嗎？')) {
-                    alert('重新處理功能開發中...');
-                  }
-                }}
-                style={{
-                  padding: '0.75rem 1.5rem',
-                  backgroundColor: '#f59e0b',
-                  color: 'white',
-                  border: 'none',
-                  borderRadius: '6px',
-                  fontSize: '0.875rem',
-                  fontWeight: '500',
-                  cursor: 'pointer',
-                  display: 'flex',
-                  alignItems: 'center',
-                  gap: '0.5rem'
-                }}
-              >
-                🔄 重新處理
-              </button>
+            <div className="record-dashboard__grid">
+              <section className="quick-panel">
+                <header className="quick-panel__header">
+                  <div>
+                    <h2>快速開始錄音</h2>
+                    <p>選擇收音模式並啟動智慧轉錄流程。</p>
+                  </div>
+                  {hasAudioPermission !== true && (
+                    <button className="btn btn--minimal" onClick={testAudioAccess}>重新檢查麥克風</button>
+                  )}
+                </header>
+
+                {isRecording ? (
+                  renderRecordingSession()
+                ) : (
+                  <div className="quick-panel__cta">
+                    <button
+                      className="btn btn--primary btn--xl"
+                      onClick={startRecording}
+                      disabled={hasAudioPermission === false}
+                    >
+                      開始會議錄音
+                      </button>
+
+                    <label className="upload-tile">
+                      <div className="upload-tile__icon"><Icon name="upload" /></div>
+                      <div>
+                        <div className="upload-tile__title">上傳音訊或影片</div>
+                        <div className="upload-tile__hint">拖放或點擊選擇，支援 MP3、WAV、MP4 等格式</div>
+                      </div>
+                      <input
+                        type="file"
+                        accept="audio/*,video/*"
+                        onChange={(e) => {
+                          const file = e.target.files?.[0];
+                          if (file) {
+                            handleFileUpload(file);
+                            e.target.value = '';
+                          }
+                        }}
+                      />
+                    </label>
+                  </div>
+                )}
+
+                <div className="mode-selector">
+                  {recordModes.map(option => (
+                    <button
+                      key={option.id}
+                      className={`mode-selector__pill ${recordingMode === option.id ? 'is-active' : ''}`}
+                      onClick={() => setRecordingMode(option.id)}
+                      type="button"
+                    >
+                      <span className="mode-selector__title">{option.title}</span>
+                      <span className="mode-selector__desc">{option.description}</span>
+                    </button>
+                  ))}
+                </div>
+
+                <div className="mode-selector__hint">
+                  {recordingMode === 'both' && '混合模式需授權螢幕分享與麥克風權限。'}
+                  {recordingMode === 'system' && '系統聲音模式需授權螢幕分享權限。'}
+                  {recordingMode === 'microphone' && '麥克風模式僅需授權麥克風權限。'}
+                </div>
+
+                {/* 大型拖放區：填補左側空白並提供直覺上傳 */}
+                <div
+                  className="quick-panel__dropzone"
+                  onDragOver={(e) => {
+                    e.preventDefault();
+                    (e.currentTarget as HTMLDivElement).classList.add('is-dragover');
+                  }}
+                  onDragLeave={(e) => {
+                    (e.currentTarget as HTMLDivElement).classList.remove('is-dragover');
+                  }}
+                  onDrop={(e) => {
+                    e.preventDefault();
+                    (e.currentTarget as HTMLDivElement).classList.remove('is-dragover');
+                    const file = e.dataTransfer?.files?.[0];
+                    if (file) {
+                      handleFileUpload(file);
+                    }
+                  }}
+                >
+                  將音訊或影片拖放到此處即可上傳（支援 MP3 · WAV · MP4 等）
+                </div>
+
+                <footer className="quick-panel__footer">
+                  <div className="quick-panel__stat">
+                    <span>錄音儲存路徑</span>
+                    <div className="quick-panel__row">
+                      <strong className="quick-panel__path" title={settings.recordingSavePath || ''}>{settings.recordingSavePath || '預設下載資料夾'}</strong>
+                      <button className="btn btn--surface" onClick={handleChooseSavePath}>選擇…</button>
+                    </div>
+                  </div>
+                  <div className="quick-panel__stat">
+                    <span>API 狀態</span>
+                    <span className={`chip chip--${getGeminiKey(settings) ? 'success' : 'danger'}`}>
+                      {getGeminiKey(settings) ? 'Gemini 金鑰已設定' : '尚未設定金鑰'}
+                    </span>
+                  </div>
+                </footer>
+
+                {recordings.length > 0 && (
+                  <div className="draft-list">
+                    <div className="draft-list__header">
+                      <h3>草稿錄音</h3>
+                      <span className="chip chip--neutral">{recordings.length} 筆</span>
+                    </div>
+                    <div className="draft-list__body">
+                      {recordings.map(recording => (
+                        <div key={recording.id} className="draft-item">
+                          <div>
+                          <div className="draft-item__name" title={recording.filename}>{require('./utils/filename').getDisplayName(recording.filename, 'medium')}</div>
+                            <div className="draft-item__meta">{recording.timestamp} · {formatTime(recording.duration)} · {(recording.size / 1024).toFixed(1)} KB</div>
+                          </div>
+                          <div className="draft-item__actions">
+                            <button
+                              className="btn btn--primary"
+                              onClick={() => startTranscriptionJob(
+                                recording.blob,
+                                recording.filename,
+                                recording.chunks || [],
+                                recording.duration,
+                                { sourcePath: recording.filePath }
+                              )}
+                            >
+                              🎯 開始轉錄
+                            </button>
+                            <button className="btn btn--minimal" onClick={() => downloadRecording(recording)}>下載</button>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </section>
+
+              <section className="task-panel">
+                <div className="task-panel__card">
+                  <div className="task-panel__header">
+                    <div>
+                      <h3>目前任務狀態</h3>
+                      <p>即時掌握轉錄流程與摘要產出進度。</p>
+                    </div>
+                    {currentTask && (
+                      <span className={`chip chip--${currentTask.status === 'done' ? 'success' : currentTask.status === 'failed' ? 'danger' : 'warning'}`}>
+                        {currentTask.status === 'done' ? '已完成' : currentTask.status === 'failed' ? '失敗' : '進行中'}
+                      </span>
+                    )}
+                  </div>
+
+                  {currentTask ? (
+                    <>
+                      <div className="task-panel__file">
+                        <div className="task-panel__file-icon"><Icon name="file" /></div>
+                        <div>
+                          <div className="task-panel__file-name" title={currentTask.filename}>{require('./utils/filename').getDisplayName(currentTask.filename, 'medium')}</div>
+                          <div className="task-panel__file-meta">建立時間：{currentTask.createdAt}</div>
+                        </div>
+                      </div>
+
+                      <div className="timeline">
+                        {timelineSteps.map(step => {
+                          const currentIndex = timelineSteps.findIndex(s => s.key === currentTask.status);
+                          const stepIndex = timelineSteps.findIndex(s => s.key === step.key);
+                          const isCompleted = currentTask.status === 'done' || stepIndex < currentIndex;
+                          const isActive = step.key === currentTask.status;
+                          return (
+                            <div key={step.key} className={`timeline__step ${isCompleted ? 'is-completed' : ''} ${isActive ? 'is-active' : ''}`}>
+                              <div className="timeline__dot" />
+                              <span className="timeline__label">{step.label}</span>
+                            </div>
+                          );
+                        })}
+                      </div>
+
+                      {currentTask.progressMessage && (
+                        <div className="task-panel__message">{currentTask.progressMessage}</div>
+                      )}
+
+                      <div className="task-panel__actions">
+                        {currentTask.status === 'done' && (
+                          <button className="btn btn--primary" onClick={() => setCurrentPage('result')}>查看結果</button>
+                        )}
+                        {currentTask.status === 'failed' && (
+                          <button className="btn btn--surface" onClick={() => handleRetryJob(currentTask)}>🔁 重新嘗試</button>
+                        )}
+                      </div>
+                    </>
+                  ) : (
+                    <div className="task-panel__empty">
+                      <div className="task-panel__empty-icon"><Icon name="clock" /></div>
+                      <div className="task-panel__empty-title">尚無進行中的任務</div>
+                      <div className="task-panel__empty-text">開始錄音或上傳檔案後，轉錄進度會顯示在這裡。</div>
+                    </div>
+                  )}
+                </div>
+
+                <div className="recent-panel">
+                  <div className="recent-panel__header">
+                    <h4>最近完成</h4>
+                    <button className="btn btn--minimal" onClick={() => setCurrentPage('result')}>檢視全部</button>
+                  </div>
+                  {completedJobs.length === 0 ? (
+                    <p className="recent-panel__empty">尚未有完成的轉錄結果。</p>
+                  ) : (
+                    <ul className="recent-panel__list">
+                      {completedJobs.map(job => (
+                        <li key={job.id}>
+                          <div>
+                            <div className="recent-panel__name" title={job.filename}>{require('./utils/filename').getDisplayName(job.filename, 'medium')}</div>
+                            <div className="recent-panel__time">完成時間：{job.createdAt}</div>
+                          </div>
+                          <button className="btn btn--surface" onClick={() => setCurrentPage('result')}>查看結果</button>
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                </div>
+              </section>
             </div>
           </div>
         );
+      }
+      case 'result': {
+        const completedJobs = jobs.filter(job => job.status === 'done' && (job.transcript || job.summary));
+
+        if (completedJobs.length === 0) {
+          return (
+            <div className="page-scroll">
+              <div className="jobs-empty" style={{ marginTop: '2rem' }}>
+                <div className="empty-state__icon"><Icon name="file" /></div>
+                <h3 className="empty-state__title">暫無完成的轉錄結果</h3>
+                <p className="empty-state__text">完成轉錄後結果將會顯示在這裡</p>
+              </div>
+            </div>
+          );
+        }
+
+        const safeIndex = Math.min(currentJobIndex, completedJobs.length - 1);
+        const currentJob = completedJobs[safeIndex];
+        // 分頁設定
+        const pageSize = 12;
+        const totalPages = Math.max(1, Math.ceil(completedJobs.length / pageSize));
+        const currentPage = Math.min(Math.max(resultsPage, 1), totalPages);
+        const start = (currentPage - 1) * pageSize;
+        const end = start + pageSize;
+        const pagedJobs = completedJobs.slice(start, end);
+
+        const buildExportContent = (job: typeof currentJob) => {
+          const summarySection = job.summary ? `會議摘要：
+${job.summary}
+
+` : '';
+          const transcriptSection = job.transcript ? `完整轉錄：
+${job.transcript}` : '';
+          return `檔案：${job.filename}
+完成時間：${job.createdAt}
+
+${summarySection}${transcriptSection}`;
+        };
+
+        const getResultSnippet = (job: typeof currentJob) => {
+          const sourceText = job.summary || job.transcript;
+          if (!sourceText) {
+            return '';
+          }
+          const plain = sourceText
+            .replace(/```[\s\S]*?```/g, ' ')
+            .replace(/[#>*`\-]/g, ' ')
+            .replace(/\s+/g, ' ')
+            .trim();
+          if (!plain) {
+            return '';
+          }
+          return plain.length > 110 ? `${plain.slice(0, 110)}…` : plain;
+        };
+
+        // 詳情頁（滿版）
+        if (isResultDetailsOpen && currentJob) {
+          return (
+            <div className="result-details">
+              {(() => {
+                // 準備資料：從 Markdown 解析各區段（概要、決議等），並整合結構化摘要
+                const minutesMd = (currentJob.summary || currentJob.result?.summary?.minutesMd || '').trim();
+                const parseSections = (md: string): Record<string, string[]> => {
+                  const out: Record<string, string[]> = {};
+                  if (!md) return out;
+                  const lines = md.split(/\r?\n/);
+                  let key: string | null = null;
+                  for (const raw of lines) {
+                    const line = raw.trim();
+                    if (!line) continue;
+                    const m = line.match(/^##\s+(.+)$/);
+                    if (m) { key = m[1].trim(); out[key] = out[key] || []; continue; }
+                    // 列表或段落都當作一行
+                    if (line.startsWith('-') || line.startsWith('•')) {
+                      const normalized = line.replace(/^[-•]\s*/, '').trim();
+                      if (key) { (out[key] = out[key] || []).push(normalized); }
+                      continue;
+                    }
+                    if (key) { (out[key] = out[key] || []).push(line); }
+                  }
+                  return out;
+                };
+
+                const sections = parseSections(minutesMd);
+                // 同義標題對應，避免不同 Prompt 造成分段落差
+                const pick = (names: string[]): string[] => {
+                  for (const n of names) {
+                    if (sections[n] && sections[n].length) return sections[n];
+                  }
+                  return [];
+                };
+                // 摘要全文：直接以整份 minutesMd 扁平化的行為主（避免資訊量流失）
+                const overview = Object.values(sections).flat();
+                const decisions = pick(['決議與結論', '重要決議', '決議']);
+                const highlightsFromMd = pick(['主要重點', '重點摘要', '重點']);
+
+                const summaryObj = currentJob.result?.summary as any;
+                // 嚴格模式：只接受模型明確標記的 [高]/[中]/[低]（半形方括號＋空格），其餘不推斷。
+                const parsePriorityFromText = (text: string): { clean: string; priority?: 'high'|'medium'|'low' } => {
+                  const m = text.match(/^\s*\[(高|中|低)\]\s+(.+)$/);
+                  if (!m) return { clean: text.trim() };
+                  const lvl = m[1];
+                  const clean = m[2].trim();
+                  const priority = lvl === '高' ? 'high' : lvl === '中' ? 'medium' : 'low';
+                  return { clean, priority };
+                };
+                const highlightsData = (summaryObj?.highlights && summaryObj.highlights.length > 0)
+                  ? (summaryObj.highlights as any[]).map((h: any, i: number) => {
+                      if (typeof h === 'string') {
+                        const p = parsePriorityFromText(h);
+                        return { id: String(i + 1), content: p.clean, priority: p.priority } as any;
+                      }
+                      // 只接受 'high'|'medium'|'low'，其餘當作無優先級
+                      const pr = ((): 'high'|'medium'|'low'|undefined => {
+                        const val = (h.priority || '').toString().toLowerCase();
+                        return val === 'high' ? 'high' : val === 'medium' ? 'medium' : val === 'low' ? 'low' : undefined;
+                      })();
+                      return { id: String(i + 1), content: h.text || '', priority: pr } as any;
+                    })
+                  : highlightsFromMd.map((t, i) => {
+                      const p = parsePriorityFromText(t);
+                      // 僅在模型明確輸出 [高]/[中]/[低] 時標記；沒有就不標
+                      return { id: String(i + 1), content: p.clean, priority: p.priority } as any;
+                    });
+
+                const decisionsData = decisions.map((t, i) => ({ id: String(i + 1), content: t }));
+
+                const parseTodoFromText = (line: string) => {
+                  // 支援：事項：…｜負責人：…｜期限：MM/DD｜狀態：進行中
+                  const parts = line.split(/\s*[｜|]\s*/);
+                  let task = line, owner: string|undefined, due: string|undefined, status: 'pending'|'in-progress'|'completed'|undefined;
+                  for (const part of parts) {
+                    if (/事項[:：]/.test(part)) task = part.replace(/事項[:：]/, '').trim();
+                    if (/負責人[:：]/.test(part)) owner = part.replace(/負責人[:：]/, '').trim();
+                    if (/(期限|到期|日期)[:：]/.test(part)) due = part.replace(/(期限|到期|日期)[:：]/, '').trim();
+                    if (/狀態[:：]/.test(part)) {
+                      const s = part.replace(/狀態[:：]/, '').trim();
+                      if (/完成/.test(s)) status = 'completed'; else if (/進行/.test(s)) status = 'in-progress'; else status = 'pending';
+                    }
+                  }
+                  return { task: task.trim(), owner, due, status: status || 'pending' };
+                };
+                const todosData = (summaryObj?.todos && (summaryObj.todos as any[]).length > 0)
+                  ? ((summaryObj.todos as any[]).map((t: any, i: number) => ({ id: String(i + 1), task: t.task || t.text || '', assignee: t.owner, dueDate: t.due || t.deadline, status: ((): any => { const s = (t.status || '').toString(); if (/完成/.test(s)) return 'completed'; if (/進行/.test(s)) return 'in-progress'; return 'pending'; })() })))
+                  : ((sections['待辦事項'] || []).map((line: string, i: number) => { const parsed = parseTodoFromText(line); return { id: String(i + 1), task: parsed.task, assignee: parsed.owner, dueDate: parsed.due, status: parsed.status as any }; }));
+
+                const timelineData = ((currentJob.timelineItems && currentJob.timelineItems.length > 0)
+                  ? currentJob.timelineItems
+                  : (summaryObj?.timeline || [])
+                ).map((t: any, i: number) => ({
+                  id: String(i + 1),
+                  time: t.timeRange || t.time || undefined,
+                  title: t.item,
+                  description: t.desc || ''
+                }));
+
+                // 若 MD 中沒有 overview，退而用整份 minutesMd 的前幾段
+                const overviewFallback = () => {
+                  if (!minutesMd) return [] as string[];
+                  const paras = minutesMd
+                    .split(/\r?\n/)
+                    .map(l => l.trim())
+                    .filter(Boolean)
+                    .filter(l => !/^#/.test(l))
+                    .map(l => l.replace(/^[-•]\s*/, ''));
+                  return paras.slice(0, 6);
+                };
+
+                const isProcessing = currentJob.status !== 'done' && currentJob.status !== 'failed';
+                
+                const parseTsToSeconds = (ts?: string): number | null => {
+                  if (!ts) return null;
+                  const start = ts.split('-')[0];
+                  const parts = start.split(':').map(Number);
+                  if (parts.some(n => Number.isNaN(n))) return null;
+                  return (parts.length === 3)
+                    ? parts[0] * 3600 + parts[1] * 60 + parts[2]
+                    : parts[0] * 60 + parts[1];
+                };
+                const handleJumpToTranscript = (item: { time?: string }) => {
+                  const startSec = parseTsToSeconds(item.time);
+                  setResultViewMode('transcript');
+                  setTimeout(() => {
+                    if (startSec == null || !currentJob.transcriptSegments || currentJob.transcriptSegments.length === 0) {
+                      transcriptContainerRef.current?.scrollTo({ top: 0, behavior: 'smooth' });
+                      return;
+                    }
+                    let idx = currentJob.transcriptSegments.findIndex(seg => {
+                      const s = typeof seg.start === 'number' ? seg.start : (parseTsToSeconds(String(seg.start)) ?? 0);
+                      return s >= (startSec as number);
+                    });
+                    if (idx < 0) idx = 0;
+                    const targetEl = transcriptItemRefs.current[idx];
+                    targetEl?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+                  }, 50);
+                };
+
+                const renderDetailBody = () => {
+                  if (resultViewMode === 'transcript') {
+                    if (!currentJob.transcript) {
+                      return (
+                        <div className="jobs-empty" style={{ border: 'none', background: 'transparent', padding: '2rem' }}>
+                          <p className="empty-state__text">尚未產出逐字稿內容</p>
+                        </div>
+                      );
+                    }
+                    if (currentJob.transcriptSegments && currentJob.transcriptSegments.length > 0) {
+                      return (
+                        <div>
+                          <TranscriptToolbarKit
+                            query={transcriptQuery}
+                            onQueryChange={setTranscriptQuery}
+                            speakers={[...new Set(currentJob.transcriptSegments.map(s => s.speaker).filter(Boolean) as string[])]}
+                            speaker={transcriptSpeaker}
+                            onSpeakerChange={setTranscriptSpeaker}
+                            onCopy={() => {
+                              const content = buildExportContent(currentJob);
+                              window.electronAPI?.clipboard?.writeText?.(content);
+                            }}
+                            onDownload={() => {
+                              const blob = new Blob([buildExportContent(currentJob)], { type: 'text/plain;charset=utf-8' });
+                              const url = URL.createObjectURL(blob);
+                              const a = document.createElement('a');
+                              a.href = url;
+                              a.download = `${currentJob.filename.replace(/\.[^/.]+$/, '')}-transcript.txt`;
+                              document.body.appendChild(a);
+                              a.click();
+                              URL.revokeObjectURL(url);
+                              a.remove();
+                            }}
+                          />
+                          <div className="result-transcript-list" ref={transcriptContainerRef}>
+                            {currentJob.transcriptSegments
+                              .filter(seg => (transcriptSpeaker ? seg.speaker === transcriptSpeaker : true))
+                              .filter(seg => (transcriptQuery ? (seg.text?.toLowerCase()?.includes(transcriptQuery.toLowerCase())) : true))
+                              .map((segment, idx) => {
+                                const startLabel = typeof segment.start === 'number' ? formatSecondsToTimestamp(segment.start) : (segment.start as string) ?? '--:--';
+                                const endLabel = typeof segment.end === 'number' ? formatSecondsToTimestamp(segment.end) : (segment.end as string) ?? '--:--';
+                                return (
+                                  <div ref={(el) => { transcriptItemRefs.current[idx] = el; }} key={`${segment.start}-${segment.end}-${idx}`} className="transcript-item">
+                                    <div>
+                                      <div className="transcript-item__speaker">{segment.speaker}</div>
+                                      <div className="transcript-item__time">{startLabel} - {endLabel}</div>
+                                    </div>
+                                    <div style={{ flex: 1 }}>{segment.text}</div>
+                                  </div>
+                                );
+                              })}
+                          </div>
+                        </div>
+                      );
+                    }
+                    return <div style={{ whiteSpace: 'pre-wrap', lineHeight: 1.8 }}>{currentJob.transcript}</div>;
+                  }
+                  // summary mode
+                  return (
+                    <>
+                      <SummaryCardKit summary={overview.length ? overview : overviewFallback()} fullContent={overview.length ? overview : overviewFallback()} />
+                      <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                        <HighlightsCardKit items={highlightsData} />
+                        <DecisionsCardKit items={decisionsData} />
+                        <TodosCardKit items={todosData} />
+                      </div>
+                      <TimelineCardKit items={timelineData} onJump={handleJumpToTranscript} />
+                      <section className="rounded-2xl border border-[#E2E8F0] bg-white p-4 shadow-[0_18px_40px_-24px_rgba(15,23,42,0.18)]">
+                        <div className="flex items-center justify-between">
+                          <h4 className="text-[#0F172A] font-semibold">模型原始摘要（Markdown）</h4>
+                          <button className="btn btn--surface" onClick={() => setShowRawSummary(v => !v)}>{showRawSummary ? '收合' : '查看'}</button>
+                        </div>
+                        {showRawSummary && (
+                          <pre style={{ marginTop: 8, whiteSpace: 'pre-wrap', fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, Liberation Mono, monospace', fontSize: 13, color: '#334155' }}>
+                            {currentJob.summary || '（無）'}
+                          </pre>
+                        )}
+                      </section>
+                    </>
+                  );
+                };
+
+                return (
+                  <>
+                    <KitResultHeader
+                      fileName={currentJob.filename}
+                      completedTime={currentJob.createdAt}
+                      currentMode={resultViewMode}
+                      onModeChange={(m) => setResultViewMode(m)}
+                      onBack={() => setIsResultDetailsOpen(false)}
+                      files={completedJobs.map(j => ({ id: j.id, label: j.filename }))}
+                      onSelectFile={(id) => {
+                        const idx = completedJobs.findIndex(j => j.id === id);
+                        if (idx >= 0) setCurrentJobIndex(idx);
+                      }}
+                      showProgress={isProcessing}
+                      progressValue={currentJob.progress || 0}
+                      estimatedTime={currentJob.progressMessage?.match(/預估剩餘\s([^）]+)/)?.[1] || '--:--'}
+                    />
+
+                    <ProgressBar progress={currentJob.progress || 0} isVisible={isProcessing} />
+
+                    <div className="result-content">
+                      <div className="result-body result-single">{renderDetailBody()}</div>
+                    </div>
+                  </>
+                );
+              })()}
+            </div>
+          );
+        }
+
+        // 清單頁
+        return (
+          <div className="page-scroll page-scroll--flush">
+            <div className="result-layout">
+              <div className="result-toolbar">
+                <div className="page-heading">
+                  <h2 className="page-heading__title">會議轉錄結果</h2>
+                </div>
+              </div>
+
+              <div className="result-collection">
+                {pagedJobs.map((job, index) => {
+                  const isActive = index === safeIndex;
+                  const snippet = getResultSnippet(job);
+                  return (
+                    <div
+                      key={job.id}
+                      className={`result-card ${isActive ? 'is-active' : ''}`}
+                      role="button"
+                      tabIndex={0}
+                      onClick={() => {
+                        setCurrentJobIndex(index);
+                        setIsResultDetailsOpen(true);
+                      }}
+                      onKeyDown={(event) => {
+                        if (event.key === 'Enter' || event.key === ' ') {
+                          event.preventDefault();
+                          setCurrentJobIndex(index);
+                          setIsResultDetailsOpen(true);
+                        }
+                      }}
+                    >
+                      <div className="result-card__header">
+                        <div className="result-card__title" title={job.filename}>{require('./utils/filename').getDisplayName(job.filename, 'medium')}</div>
+                        <button
+                          type="button"
+                          className="result-card__delete"
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            handleDeleteJob(job.id);
+                          }}
+                          title="刪除轉錄結果"
+                        >
+                          刪除
+                        </button>
+                      </div>
+                      <div className="result-card__meta">完成時間：{job.createdAt}</div>
+                      {job.audioFile && (
+                        <div className="result-card__meta" title={job.audioFile}><Icon name="file" /> {job.audioFile}</div>
+                      )}
+                      {snippet && (
+                        <p className="result-card__snippet">{snippet}</p>
+                      )}
+                      <div className="result-card__footer">
+                        <span className="chip chip--success">已完成</span>
+                        <button
+                          type="button"
+                          className="result-card__view"
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            setCurrentJobIndex(index);
+                            setIsResultDetailsOpen(true);
+                          }}
+                        >
+                          查看
+                        </button>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+              {totalPages > 1 && (
+                <div style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', gap: 8, marginTop: 16 }}>
+                  <button
+                    type="button"
+                    className="btn btn--surface"
+                    disabled={currentPage <= 1}
+                    onClick={() => setResultsPage(p => Math.max(1, p - 1))}
+                  >上一頁</button>
+                  {Array.from({ length: totalPages }, (_, i) => i + 1).map(p => (
+                    <button
+                      key={p}
+                      type="button"
+                      className="btn btn--minimal"
+                      style={{
+                        background: p === currentPage ? 'rgba(226,232,240,0.9)' : undefined,
+                        border: '1px solid rgba(226,232,240,0.8)'
+                      }}
+                      onClick={() => setResultsPage(p)}
+                    >{p}</button>
+                  ))}
+                  <button
+                    type="button"
+                    className="btn btn--surface"
+                    disabled={currentPage >= totalPages}
+                    onClick={() => setResultsPage(p => Math.min(totalPages, p + 1))}
+                  >下一頁</button>
+                </div>
+              )}
+            </div>
+          </div>
+        );
+      }
       case 'settings':
         return (
           <div style={{ width: '100%', maxWidth: '960px', margin: '0 auto', textAlign: 'left' }}><SettingsPage /></div>
+        );
+      case 'stt':
+        return (
+          <div style={{ width: '100%', maxWidth: '960px', margin: '0 auto', textAlign: 'left' }}><GoogleSTTSettingsPage /></div>
         );
       case 'prompts':
         return <PromptsPage />;
@@ -2348,20 +3027,24 @@ const App: React.FC = () => {
     }
   };
 
+  const activeJobCountValue = jobs.filter(job => job.status !== 'done' && job.status !== 'failed').length;
+  const completedJobCountValue = jobs.filter(job => job.status === 'done').length;
+  const pageMeta = PAGE_META[currentPage];
+  const isRecordPage = currentPage === 'record';
+  const useFluidContent =
+    currentPage === 'record' ||
+    currentPage === 'prompts' ||
+    currentPage === 'settings' ||
+    (currentPage === 'result' && isResultDetailsOpen);
+
   return (
-    <div style={{ 
-      display: 'flex', 
-      height: '100vh', 
-      backgroundColor: '#f9fafb',
-      fontFamily: 'system-ui, -apple-system, sans-serif'
-    }}>
-      {/* Navigation Sidebar */}
-      <SimpleNavigation 
-        currentPage={currentPage} 
-        onPageChange={setCurrentPage}
+    <div className="app-shell">
+      <SimpleNavigation
+        currentPage={currentPage === 'stt' ? 'settings' : currentPage}
+        onPageChange={setCurrentPage as any}
         jobCount={jobs.length}
-        activeJobCount={jobs.filter(job => job.status !== 'done' && job.status !== 'failed').length}
-        completedJobCount={jobs.filter(job => job.status === 'done').length}
+        activeJobCount={activeJobCountValue}
+        completedJobCount={completedJobCountValue}
         settings={settings}
         appVersion={appVersion}
         updateStatus={updateStatusMessage}
@@ -2374,27 +3057,20 @@ const App: React.FC = () => {
         onInstallUpdate={handleInstallUpdate}
       />
 
-      {/* Main Content */}
-      <main style={{ flex: 1, overflow: 'auto' }}>
-        <div style={{ 
-          padding: '2rem',
-          display: 'flex',
-          alignItems: 'center',
-          justifyContent: 'center',
-          minHeight: '100%'
-        }}>
-          <div style={{
-            textAlign: 'center',
-            padding: '2rem',
-            backgroundColor: 'white',
-            borderRadius: '8px',
-            boxShadow: '0 1px 3px rgba(0, 0, 0, 0.1)',
-            minWidth: '400px'
-          }}>
-            {renderCurrentPage()}
-          </div>
+      <div className={`app-main${isRecordPage ? ' app-main--record' : ''}`}>
+        {!isRecordPage && !(currentPage === 'result' && isResultDetailsOpen) && (
+          <header className="app-main__header">
+            <div className="page-heading">
+              <h1 className="page-heading__title">{pageMeta.title}</h1>
+              <p className="page-heading__subtitle">{pageMeta.subtitle}</p>
+            </div>
+          </header>
+        )}
+
+        <div className={`app-main__content${useFluidContent ? ' app-main__content--fluid' : ''}${currentPage === 'settings' ? ' app-main__content--settings' : ''}`}>
+          {renderCurrentPage()}
         </div>
-      </main>
+      </div>
     </div>
   );
 };

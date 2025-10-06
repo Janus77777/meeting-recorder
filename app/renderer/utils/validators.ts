@@ -78,24 +78,85 @@ export const validateSettings = (settings: AppSettings): ValidationResult => {
   };
 };
 
-// File validation
-export const validateAudioFile = (file: File): ValidationResult => {
+// File validation (Audio and Video)
+export const validateMediaFile = (file: File): ValidationResult => {
   const errors: Record<string, string> = {};
 
-  // Check file type
   const allowedTypes = [
+    // Audio formats
     'audio/webm',
-    'audio/wav', 
+    'audio/wav',
     'audio/mp3',
     'audio/mpeg',
     'audio/ogg',
     'audio/mp4',
-    'audio/x-wav'
+    'audio/mp4a-latm',
+    'audio/x-wav',
+    'audio/m4a',
+    'audio/x-m4a',
+    'audio/aac',
+    'audio/flac',
+    // Video formats
+    'video/mp4',
+    'video/webm',
+    'video/quicktime',
+    'video/x-msvideo',
+    'video/avi',
+    'video/mov'
   ];
 
-  if (!allowedTypes.includes(file.type)) {
-    errors.type = '不支援的音檔格式。支援格式：WebM, WAV, MP3, OGG';
+  const normalizeMime = (value?: string) => {
+    const base = value?.split(';')[0]?.trim().toLowerCase() ?? '';
+    switch (base) {
+      case 'audio/mp4a-latm':
+      case 'audio/x-m4a':
+        return 'audio/m4a';
+      default:
+        return base;
+    }
+  };
+
+  const resolveMimeFromExtension = (filename: string): string | undefined => {
+    const ext = filename.split('.').pop()?.toLowerCase();
+    switch (ext) {
+      case 'mp3':
+        return 'audio/mpeg';
+      case 'wav':
+        return 'audio/wav';
+      case 'm4a':
+      case 'mp4a':
+        return 'audio/m4a';
+      case 'aac':
+        return 'audio/aac';
+      case 'flac':
+        return 'audio/flac';
+      case 'ogg':
+        return 'audio/ogg';
+      case 'opus':
+        return 'audio/opus';
+      case 'webm':
+        return 'audio/webm';
+      case 'mp4':
+        return 'video/mp4';
+      case 'mov':
+        return 'video/quicktime';
+      case 'avi':
+        return 'video/avi';
+      default:
+        return undefined;
+    }
+  };
+
+  let detectedType = normalizeMime(file.type);
+  if (!detectedType && file.name) {
+    detectedType = resolveMimeFromExtension(file.name) ?? '';
   }
+
+  if (!detectedType || !allowedTypes.includes(detectedType)) {
+    errors.type = '不支援的檔案格式。支援格式：MP4, WebM, WAV, MP3, M4A, MOV, AVI 等音訊/影片檔案';
+  }
+
+  const effectiveType = detectedType || file.type;
 
   // Check file size (max 500MB for MVP)
   const maxSize = 500 * 1024 * 1024; // 500MB
@@ -105,7 +166,7 @@ export const validateAudioFile = (file: File): ValidationResult => {
 
   // Check minimum file size (at least 1KB)
   if (file.size < 1024) {
-    errors.size = '檔案太小，可能不是有效的音檔';
+    errors.size = '檔案太小，可能不是有效的媒體檔案';
   }
 
   return {
@@ -113,6 +174,9 @@ export const validateAudioFile = (file: File): ValidationResult => {
     errors
   };
 };
+
+// Backward compatibility alias
+export const validateAudioFile = validateMediaFile;
 
 // Meeting data validation
 export const validateMeetingData = (title: string, participants: string[]): ValidationResult => {

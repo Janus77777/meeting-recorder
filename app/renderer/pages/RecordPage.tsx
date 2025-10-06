@@ -104,7 +104,7 @@ export const RecordPage: React.FC = () => {
       showSuccess('上傳完成！正在處理中...');
       
       // Navigate to jobs page
-      setCurrentPage('jobs');
+      setCurrentPage('record');
 
     } catch (error) {
       console.error('Upload failed:', error);
@@ -307,10 +307,10 @@ export const RecordPage: React.FC = () => {
         </button>
 
         <button
-          onClick={() => setCurrentPage('jobs')}
+          onClick={() => setCurrentPage('record')}
           className="px-8 py-3 border border-gray-300 text-gray-700 font-semibold rounded-lg hover:bg-gray-50 transition-colors"
         >
-          查看任務
+          查看狀態
         </button>
       </div>
 
@@ -322,7 +322,7 @@ export const RecordPage: React.FC = () => {
           <li>點擊錄音按鈕開始錄製</li>
           <li>錄音完成後點擊「開始處理」上傳音檔</li>
           <li>系統將自動進行語音轉錄和摘要生成</li>
-          <li>在「任務列表」頁面查看處理進度和結果</li>
+          <li>透過上方狀態欄確認處理進度，完成後前往「查看結果」頁</li>
         </ol>
       </div>
     </div>

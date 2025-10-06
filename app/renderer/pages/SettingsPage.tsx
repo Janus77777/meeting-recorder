@@ -1,6 +1,7 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import type { CSSProperties } from 'react';
-import { useSettingsStore, useToastActions } from '../services/store';
+import { useSettingsStore, useToastActions, useUIStore } from '../services/store';
+// Google STT 詳細設定走獨立頁（透過 setCurrentPage('stt') 切換）
 import { validateSettings, checkAPIHealth } from '../utils/validators';
 import { DEFAULT_SETTINGS, BUILTIN_GOOGLE_STT_KEY } from '@main/config/env';
 import { getEnabledFeatures, getDisabledFeatures, FEATURE_DESCRIPTIONS } from '@shared/flags';
@@ -10,10 +11,10 @@ import { AppSettings, GoogleCloudSTTSettings } from '@shared/types';
 const containerStyle: CSSProperties = {
   maxWidth: '960px',
   margin: '0 auto',
-  padding: '32px 24px 48px',
+  padding: '10px 24px 16px', // 進一步縮小頂部內距，讓內容上移
   display: 'flex',
   flexDirection: 'column',
-  gap: '24px'
+  gap: '16px'
 };
 
 const headerStyle: CSSProperties = {
@@ -62,11 +63,11 @@ const cardStyle: CSSProperties = {
   backgroundColor: '#ffffff',
   border: '1px solid #e5e7eb',
   borderRadius: '12px',
-  padding: '24px',
+  padding: '20px',
   boxShadow: '0 1px 2px rgba(15, 23, 42, 0.08)',
   display: 'flex',
   flexDirection: 'column',
-  gap: '16px'
+  gap: '14px'
 };
 
 const sectionTitleStyle: CSSProperties = {
@@ -214,13 +215,6 @@ const actionRowStyle: CSSProperties = {
   flexWrap: 'wrap'
 };
 
-const helpBoxStyle: CSSProperties = {
-  backgroundColor: '#eff6ff',
-  border: '1px solid #bfdbfe',
-  color: '#1d4ed8',
-  borderRadius: '12px',
-  padding: '20px'
-};
 
 const mergeStyles = (...styles: Array<CSSProperties | undefined>) => {
   const result: CSSProperties = {};
@@ -275,8 +269,13 @@ const featureIcon = (color: string) => ({
 });
 
 export const SettingsPage: React.FC = () => {
+  // 以縮放自適應可視高度，避免出現頁面滾動或被裁切
+  const rootRef = useRef<HTMLDivElement | null>(null);
+  const [scale, setScale] = useState(1);
   const { settings, updateSettings, resetSettings } = useSettingsStore();
   const { showError, showSuccess, showInfo } = useToastActions();
+  // 詳細設定改為獨立頁面顯示，避免本頁滾輪問題
+  const { setCurrentPage } = useUIStore();
 
   const mergeSettingsWithDefaults = useMemo(() => {
     const defaults = DEFAULT_SETTINGS.googleCloudSTT ?? {
@@ -311,6 +310,27 @@ export const SettingsPage: React.FC = () => {
   const [showAdvancedGeminiSettings, setShowAdvancedGeminiSettings] = useState(false);
   const [isTestingSTT, setIsTestingSTT] = useState(false);
   const [sttTestResult, setSttTestResult] = useState<{ success: boolean; message: string } | null>(null);
+  const [activeTab, setActiveTab] = useState<'basic' | 'stt' | 'gemini' | 'about'>('basic');
+  
+  useEffect(() => {
+    const updateScale = () => {
+      const el = rootRef.current;
+      if (!el) return;
+      // 找到可用高度（父層 app-main__content 高度）
+      const parent = el.parentElement || document.querySelector('.app-main__content') as HTMLElement | null;
+      if (!parent) return;
+      const available = parent.clientHeight - 8; // 留少量安全邊
+      const needed = el.scrollHeight;
+      if (needed > 0 && available > 0) {
+        const s = Math.min(1, (available / needed));
+        // 允許更小比例以保證完整顯示（Chromium 支援 zoom）
+        setScale(Number.isFinite(s) && s > 0 ? s : 1);
+      }
+    };
+    updateScale();
+    window.addEventListener('resize', updateScale);
+    return () => window.removeEventListener('resize', updateScale);
+  }, [activeTab, showAdvancedGeminiSettings]);
 
   useEffect(() => {
     setFormData(mergeSettingsWithDefaults(settings));
@@ -668,7 +688,7 @@ export const SettingsPage: React.FC = () => {
         <div style={applicationInfoGridStyle}>
           <div>
             <div style={{ color: '#6b7280', marginBottom: '4px' }}>版本</div>
-            <div style={{ fontWeight: 600 }}>1.1.5</div>
+            <div style={{ fontWeight: 600 }}>1.1.6</div>
           </div>
           <div>
             <div style={{ color: '#6b7280', marginBottom: '4px' }}>API 基礎網址</div>
@@ -690,40 +710,58 @@ export const SettingsPage: React.FC = () => {
   };
 
   return (
-    <div style={containerStyle}>
-      <div style={headerStyle}>
-        <h1 style={titleStyle}>應用設定</h1>
-        <p style={subtitleStyle}>配置 API 連接和應用程式偏好設定</p>
-      </div>
+    <div
+      ref={rootRef}
+      style={{
+        ...containerStyle,
+        // Electron/Chromium 支援 zoom，會參與版面計算；transform 作為後備
+        // 避免裁切和捲軸
+        transform: `scale(${scale})`,
+        transformOrigin: 'top center',
+        zoom: scale
+      } as any}
+    >
+      {/* 移除頁內大標題，騰出垂直空間 */}
 
       {hasUnsavedChanges && (
         <div style={unsavedWarningStyle}>
-          <span role="img" aria-label="warning">⚠️</span>
+          <span style={{ fontWeight: 700 }}>!</span>
           <span>您有未保存的變更</span>
         </div>
       )}
 
-      <div style={layoutStyle}>
-        <div style={columnStyle}>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: '24px' }}>
+        {activeTab === 'basic' && (
           <div style={cardStyle}>
-            <h2 style={sectionTitleStyle}>API 與轉錄設定</h2>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+              <h2 style={sectionTitleStyle}>API 與轉錄設定</h2>
+              {transcriptionMode === 'hybrid_stt' && (
+                <button
+                  type="button"
+                  onClick={() => setCurrentPage('stt')}
+                  style={{ padding: '8px 12px', borderRadius: 10, border: '1px solid #d1d5db', background: '#fff', cursor: 'pointer', fontWeight: 600 }}
+                >
+                  ⚙️ Google STT 詳細設定
+                </button>
+              )}
+            </div>
 
-            <div style={fieldBlockStyle}>
-              <span style={labelStyle}>轉錄模式</span>
-              <div style={modeButtonsWrapperStyle}>
+          <div style={fieldBlockStyle}>
+            <span style={labelStyle}>轉錄模式</span>
+            <div style={modeButtonsWrapperStyle}>
                 <button
                   type="button"
                   onClick={() => handleInputChange('transcriptionMode', 'gemini_direct')}
                   style={modeButtonStyle(transcriptionMode === 'gemini_direct', 'gemini')}
                 >
-                  🤖 Gemini 直接轉錄
+                  Gemini 直接轉錄
                 </button>
                 <button
                   type="button"
                   onClick={() => handleInputChange('transcriptionMode', 'hybrid_stt')}
                   style={modeButtonStyle(transcriptionMode === 'hybrid_stt', 'stt')}
                 >
-                  🎧 Google STT + Gemini
+                  Google STT + Gemini
                 </button>
               </div>
               <p style={helperTextStyle}>
@@ -782,263 +820,127 @@ export const SettingsPage: React.FC = () => {
 
             {transcriptionMode === 'hybrid_stt' && sttTestResult && (
               <div style={{ fontSize: '13px', color: sttTestResult.success ? '#047857' : '#b45309' }}>
-                {sttTestResult.success ? '✅ ' : '⚠️ '}
                 {sttTestResult.message}
               </div>
             )}
+            
+            {/* 詳細設定改為獨立頁顯示 */}
 
-            {transcriptionMode === 'hybrid_stt' && (
-              <div
-                style={{
-                  marginTop: '8px',
-                  border: '1px solid #fcd34d',
-                  backgroundColor: '#fffbeb',
-                  borderRadius: '12px',
-                  padding: '18px',
-                  display: 'flex',
-                  flexDirection: 'column',
-                  gap: '14px'
-                }}
+            {renderDiagnosticResult()}
+          </div>
+        )}
+
+
+        {activeTab === 'gemini' && formData.useGemini && (
+          <div style={cardStyle}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+              <h2 style={sectionTitleStyle}>Gemini 進階設定</h2>
+              <button
+                type="button"
+                onClick={() => setShowAdvancedGeminiSettings(!showAdvancedGeminiSettings)}
+                style={{ background: 'none', border: 'none', color: '#2563eb', fontWeight: 600, fontSize: '14px', cursor: 'pointer' }}
               >
-                <div>
-                  <div style={{ fontWeight: 600, color: '#b45309', marginBottom: '6px' }}>Google STT 連線設定</div>
-                  <div style={{ fontSize: '12px', color: '#92400e' }}>
-                    請填寫 Google Cloud Speech-to-Text v2 所需資訊，建議先建立 Recognizer 並下載 Service Account JSON。
-                  </div>
-                </div>
-
-                <div style={twoColumnGridStyle}>
-                  <div style={fieldBlockStyle}>
-                    <span style={labelStyle}>Project ID</span>
-                    <input
-                      type="text"
-                      value={googleSttSettings.projectId ?? ''}
-                      onChange={(e) => handleGoogleSttChange('projectId', e.target.value)}
-                      placeholder="my-gcp-project"
-                      style={mergeStyles(baseInputStyle, validationErrors['googleCloudSTT.projectId'] ? errorInputStyle : undefined)}
-                    />
-                    {renderValidationMessage('googleCloudSTT.projectId')}
-                  </div>
-
-                  <div style={fieldBlockStyle}>
-                    <span style={labelStyle}>Location</span>
-                    <input
-                      type="text"
-                      value={googleSttSettings.location ?? ''}
-                      onChange={(e) => handleGoogleSttChange('location', e.target.value)}
-                      placeholder="global / us-west1 ..."
-                      style={mergeStyles(baseInputStyle, validationErrors['googleCloudSTT.location'] ? errorInputStyle : undefined)}
-                    />
-                    {renderValidationMessage('googleCloudSTT.location')}
-                  </div>
-
-                  <div style={fieldBlockStyle}>
-                    <span style={labelStyle}>Recognizer ID</span>
-                    <input
-                      type="text"
-                      value={googleSttSettings.recognizerId ?? ''}
-                      onChange={(e) => handleGoogleSttChange('recognizerId', e.target.value)}
-                      placeholder="my-recognizer"
-                      style={mergeStyles(baseInputStyle, validationErrors['googleCloudSTT.recognizerId'] ? errorInputStyle : undefined)}
-                    />
-                    {renderValidationMessage('googleCloudSTT.recognizerId')}
-                  </div>
-
-                  <div style={fieldBlockStyle}>
-                    <span style={labelStyle}>Service Account Key 路徑</span>
-                    <input
-                      type="text"
-                      value={googleSttSettings.keyFilePath ?? ''}
-                      onChange={(e) => handleGoogleSttChange('keyFilePath', e.target.value)}
-                      placeholder="/Users/xxx/credentials.json"
-                      style={mergeStyles(baseInputStyle, validationErrors['googleCloudSTT.keyFilePath'] ? errorInputStyle : undefined)}
-                    />
-                    {renderValidationMessage('googleCloudSTT.keyFilePath')}
-                    {googleSttSettings.keyFilePath === BUILTIN_GOOGLE_STT_KEY && (
-                      <span style={helperTextStyle}>將使用內建金鑰（resources/credentials/google-stt.json）</span>
-                    )}
-                  </div>
-
-                  <div style={fieldBlockStyle}>
-                    <span style={labelStyle}>語言代碼</span>
-                    <input
-                      type="text"
-                      value={googleSttSettings.languageCode ?? ''}
-                      onChange={(e) => handleGoogleSttChange('languageCode', e.target.value)}
-                      placeholder="例如：zh-TW"
-                      style={baseInputStyle}
-                    />
-                  </div>
-
-                  <div style={fieldBlockStyle}>
-                    <span style={labelStyle}>模型 ID</span>
-                    <input
-                      type="text"
-                      value={googleSttSettings.model ?? ''}
-                      onChange={(e) => handleGoogleSttChange('model', e.target.value)}
-                      placeholder="建議：latest_long"
-                      style={baseInputStyle}
-                    />
-                  </div>
-
-                  <div style={fieldBlockStyle}>
-                    <span style={labelStyle}>最少說話者數</span>
-                    <input
-                      type="number"
-                      min={1}
-                      value={googleSttSettings.minSpeakerCount ?? 1}
-                      onChange={(e) => handleGoogleSttChange('minSpeakerCount', Number(e.target.value) || 1)}
-                      style={baseInputStyle}
-                    />
-                  </div>
-
-                  <div style={fieldBlockStyle}>
-                    <span style={labelStyle}>最多說話者數</span>
-                    <input
-                      type="number"
-                      min={1}
-                      value={googleSttSettings.maxSpeakerCount ?? 6}
-                      onChange={(e) => handleGoogleSttChange('maxSpeakerCount', Number(e.target.value) || 6)}
-                      style={baseInputStyle}
-                    />
-                  </div>
+                {showAdvancedGeminiSettings ? '隱藏進階選項' : '顯示進階選項'}
+              </button>
+            </div>
+            {showAdvancedGeminiSettings && (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
+                <div style={fieldBlockStyle}>
+                  <span style={labelStyle}>偏好模型</span>
+                  <select
+                    value={formData.geminiPreferredModel || 'gemini-2.5-pro'}
+                    onChange={(e) => handleInputChange('geminiPreferredModel', e.target.value)}
+                    style={baseInputStyle}
+                  >
+                    <option value="gemini-2.5-pro">Gemini 2.5 Pro (推薦)</option>
+                    <option value="gemini-2.5-flash">Gemini 2.5 Flash (備用)</option>
+                  </select>
                 </div>
 
                 <label style={{ display: 'flex', alignItems: 'center', gap: '8px', fontSize: '13px', color: '#374151' }}>
                   <input
                     type="checkbox"
-                    checked={googleSttSettings.enableSpeakerDiarization ?? true}
-                    onChange={(e) => handleGoogleSttChange('enableSpeakerDiarization', e.target.checked)}
+                    checked={formData.geminiEnableFallback ?? true}
+                    onChange={(e) => handleInputChange('geminiEnableFallback', e.target.checked)}
                   />
-                  啟用說話者分段 (Speaker Diarization)
+                  啟用模型 Fallback
                 </label>
-              </div>
-            )}
-          </div>
+                <span style={helperTextStyle}>當主要模型不可用時自動嘗試其他模型</span>
 
-          {renderDiagnosticResult()}
-        </div>
+                <label style={{ display: 'flex', alignItems: 'center', gap: '8px', fontSize: '13px', color: '#374151' }}>
+                  <input
+                    type="checkbox"
+                    checked={formData.geminiDiagnosticMode ?? false}
+                    onChange={(e) => handleInputChange('geminiDiagnosticMode', e.target.checked)}
+                  />
+                  診斷模式
+                </label>
+                <span style={helperTextStyle}>啟用詳細的日誌記錄以便問題排查</span>
 
-        {formData.useGemini && (
-          <div style={columnStyle}>
-            <div style={cardStyle}>
-              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                <h2 style={sectionTitleStyle}>Gemini 進階設定</h2>
-                <button
-                  type="button"
-                  onClick={() => setShowAdvancedGeminiSettings(!showAdvancedGeminiSettings)}
-                  style={{
-                    background: 'none',
-                    border: 'none',
-                    color: '#2563eb',
-                    fontWeight: 600,
-                    fontSize: '14px',
-                    cursor: 'pointer'
-                  }}
-                >
-                  {showAdvancedGeminiSettings ? '隱藏進階選項' : '顯示進階選項'}
-                </button>
-              </div>
+                <label style={{ display: 'flex', alignItems: 'center', gap: '8px', fontSize: '13px', color: '#374151' }}>
+                  <input
+                    type="checkbox"
+                    checked={formData.geminiHealthCheckEnabled ?? true}
+                    onChange={(e) => handleInputChange('geminiHealthCheckEnabled', e.target.checked)}
+                  />
+                  啟用 API 健康檢查
+                </label>
 
-              {showAdvancedGeminiSettings && (
-                <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
-                  <div style={fieldBlockStyle}>
-                    <span style={labelStyle}>偏好模型</span>
-                    <select
-                      value={formData.geminiPreferredModel || 'gemini-2.5-pro'}
-                      onChange={(e) => handleInputChange('geminiPreferredModel', e.target.value)}
-                      style={baseInputStyle}
-                    >
-                      <option value="gemini-2.5-pro">Gemini 2.5 Pro (推薦)</option>
-                      <option value="gemini-2.5-flash">Gemini 2.5 Flash (備用)</option>
-                    </select>
-                  </div>
-
-                  <label style={{ display: 'flex', alignItems: 'center', gap: '8px', fontSize: '13px', color: '#374151' }}>
-                    <input
-                      type="checkbox"
-                      checked={formData.geminiEnableFallback ?? true}
-                      onChange={(e) => handleInputChange('geminiEnableFallback', e.target.checked)}
-                    />
-                    啟用模型 Fallback
-                  </label>
-                  <span style={helperTextStyle}>當主要模型不可用時自動嘗試其他模型</span>
-
-                  <label style={{ display: 'flex', alignItems: 'center', gap: '8px', fontSize: '13px', color: '#374151' }}>
-                    <input
-                      type="checkbox"
-                      checked={formData.geminiDiagnosticMode ?? false}
-                      onChange={(e) => handleInputChange('geminiDiagnosticMode', e.target.checked)}
-                    />
-                    診斷模式
-                  </label>
-                  <span style={helperTextStyle}>啟用詳細的日誌記錄以便問題排查</span>
-
-                  <label style={{ display: 'flex', alignItems: 'center', gap: '8px', fontSize: '13px', color: '#374151' }}>
-                    <input
-                      type="checkbox"
-                      checked={formData.geminiHealthCheckEnabled ?? true}
-                      onChange={(e) => handleInputChange('geminiHealthCheckEnabled', e.target.checked)}
-                    />
-                    啟用 API 健康檢查
-                  </label>
-
-                  <div>
-                    <div style={{ fontWeight: 600, color: '#1f2937', marginBottom: '8px' }}>重試配置</div>
-                    <div style={twoColumnGridStyle}>
-                      <div style={fieldBlockStyle}>
-                        <span style={labelStyle}>最大重試次數</span>
-                        <input
-                          type="number"
-                          min={1}
-                          max={10}
-                          value={formData.geminiRetryConfig?.maxRetries ?? 5}
-                          onChange={(e) => handleInputChange('geminiRetryConfig', {
-                            ...formData.geminiRetryConfig,
-                            maxRetries: parseInt(e.target.value, 10)
-                          })}
-                          style={baseInputStyle}
-                        />
-                      </div>
-
-                      <div style={fieldBlockStyle}>
-                        <span style={labelStyle}>基礎延遲 (毫秒)</span>
-                        <input
-                          type="number"
-                          min={1000}
-                          step={1000}
-                          value={formData.geminiRetryConfig?.baseDelay ?? 30000}
-                          onChange={(e) => handleInputChange('geminiRetryConfig', {
-                            ...formData.geminiRetryConfig,
-                            baseDelay: parseInt(e.target.value, 10)
-                          })}
-                          style={baseInputStyle}
-                        />
-                      </div>
-                    </div>
-
-                    <label style={{ display: 'flex', alignItems: 'center', gap: '8px', fontSize: '13px', color: '#374151', marginTop: '8px' }}>
+                <div>
+                  <div style={{ fontWeight: 600, color: '#1f2937', marginBottom: '8px' }}>重試配置</div>
+                  <div style={twoColumnGridStyle}>
+                    <div style={fieldBlockStyle}>
+                      <span style={labelStyle}>最大重試次數</span>
                       <input
-                        type="checkbox"
-                        checked={formData.geminiRetryConfig?.enableJitter ?? true}
+                        type="number"
+                        min={1}
+                        max={10}
+                        value={formData.geminiRetryConfig?.maxRetries ?? 5}
                         onChange={(e) => handleInputChange('geminiRetryConfig', {
                           ...formData.geminiRetryConfig,
-                          enableJitter: e.target.checked
+                          maxRetries: parseInt(e.target.value, 10)
                         })}
+                        style={baseInputStyle}
                       />
-                      隨機抖動
-                    </label>
-                    <span style={helperTextStyle}>配置請求失敗時的重試行為</span>
+                    </div>
+
+                    <div style={fieldBlockStyle}>
+                      <span style={labelStyle}>基礎延遲 (毫秒)</span>
+                      <input
+                        type="number"
+                        min={1000}
+                        step={1000}
+                        value={formData.geminiRetryConfig?.baseDelay ?? 30000}
+                        onChange={(e) => handleInputChange('geminiRetryConfig', {
+                          ...formData.geminiRetryConfig,
+                          baseDelay: parseInt(e.target.value, 10)
+                        })}
+                        style={baseInputStyle}
+                      />
+                    </div>
                   </div>
+
+                  <label style={{ display: 'flex', alignItems: 'center', gap: '8px', fontSize: '13px', color: '#374151', marginTop: '8px' }}>
+                    <input
+                      type="checkbox"
+                      checked={formData.geminiRetryConfig?.enableJitter ?? true}
+                      onChange={(e) => handleInputChange('geminiRetryConfig', {
+                        ...formData.geminiRetryConfig,
+                        enableJitter: e.target.checked
+                      })}
+                    />
+                    隨機抖動
+                  </label>
+                  <span style={helperTextStyle}>配置請求失敗時的重試行為</span>
                 </div>
-              )}
-            </div>
+              </div>
+            )}
           </div>
         )}
       </div>
 
-      {renderFeatureList()}
-      {renderApplicationInfo()}
+      {activeTab === 'about' && renderFeatureList()}
+      {activeTab === 'about' && renderApplicationInfo()}
 
       <div style={actionRowStyle}>
         <button
@@ -1060,16 +962,6 @@ export const SettingsPage: React.FC = () => {
         >
           重置設定
         </button>
-      </div>
-
-      <div style={helpBoxStyle}>
-        <h3 style={{ margin: '0 0 12px', fontSize: '15px', fontWeight: 600 }}>設定說明：</h3>
-        <ul style={{ margin: 0, paddingLeft: '20px', fontSize: '13px', color: '#1d4ed8', lineHeight: 1.6 }}>
-          <li><strong>Gemini 模式</strong>：需填寫 API 金鑰，提供最完整的語音轉文字與摘要功能。</li>
-          <li><strong>Google STT + Gemini</strong>：提供更穩定的逐字稿品質，適合長會議或高精度需求。</li>
-          <li><strong>環境切換</strong>：可依部署情境選擇開發、測試或正式環境。</li>
-          <li><strong>功能狀態</strong>：顯示目前版本已啟用與即將上線的能力，方便排程測試。</li>
-        </ul>
       </div>
     </div>
   );

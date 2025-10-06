@@ -62,20 +62,35 @@ export const useSettingsStore = create<SettingsState>()(
     }),
     {
       name: 'meeting-recorder-settings',
-      version: 2,
+      version: 3,
       migrate: (persisted, version) => {
-        if (!persisted || version < 2) {
-          return { settings: ensureSettingsDefaults(DEFAULT_SETTINGS) };
+        const coerce = (base: AppSettings): AppSettings => ensureSettingsDefaults({ ...DEFAULT_SETTINGS, ...base });
+        if (!persisted) return { settings: ensureSettingsDefaults(DEFAULT_SETTINGS) };
+        const prev = (persisted as { settings?: AppSettings }).settings;
+        if (!prev) return { settings: ensureSettingsDefaults(DEFAULT_SETTINGS) };
+
+        // v3: 預設切換為 chirp_3 + cmn-Hans-CN，開啟 diarization 與 offsets；保留使用者的 projectId/recognizerId/keyFilePath
+        if (version < 3) {
+          const stt = prev.googleCloudSTT ?? {};
+          const migrated: AppSettings = {
+            ...prev,
+            googleCloudSTT: {
+              ...stt,
+              location: 'us',
+              recognizerId: stt.recognizerId && stt.recognizerId.trim() ? stt.recognizerId : '_',
+              enabled: true,
+              languageCode: 'cmn-Hans-CN',
+              model: 'chirp_3',
+              enableWordTimeOffsets: true,
+              enableSpeakerDiarization: true,
+              minSpeakerCount: Math.min(6, Math.max(1, typeof stt.minSpeakerCount === 'number' ? stt.minSpeakerCount : 1)),
+              maxSpeakerCount: Math.min(6, Math.max(1, typeof stt.maxSpeakerCount === 'number' ? stt.maxSpeakerCount : 6))
+            }
+          } as AppSettings;
+          return { settings: coerce(migrated) };
         }
 
-        const persistedSettings = (persisted as { settings?: AppSettings }).settings;
-        if (!persistedSettings) {
-          return { settings: ensureSettingsDefaults(DEFAULT_SETTINGS) };
-        }
-
-        return {
-          settings: ensureSettingsDefaults({ ...DEFAULT_SETTINGS, ...persistedSettings })
-        };
+        return { settings: coerce(prev) };
       },
       onRehydrateStorage: () => (state) => {
         console.log('💾 Rehydrating settings from localStorage:', state);
@@ -229,11 +244,14 @@ export const useJobsStore = create<JobsState>()(
           const jobs = (state as JobsState).jobs ?? [];
           const currentJob = (state as JobsState).currentJob ?? null;
           if (currentJob) {
-            const matched = jobs.find(job => job.id === currentJob.id) ?? jobs[0] ?? null;
-            (state as JobsState).currentJob = matched;
-          } else if (jobs.length > 0) {
-            (state as JobsState).currentJob = jobs[0];
+            // 只在 currentJob 在 jobs 列表中存在時才更新
+            const matched = jobs.find(job => job.id === currentJob.id);
+            if (matched) {
+              (state as JobsState).currentJob = matched;
+            }
+            // 如果 currentJob 不在列表中，保持原樣，不要重設為 jobs[0]
           }
+          // 移除自動設定為 jobs[0] 的邏輯，避免覆蓋用戶的當前工作
         }
       }
     }
@@ -325,7 +343,7 @@ export const useToastStore = create<ToastState>((set, get) => ({
 
 // UI State Store
 interface UIState {
-  currentPage: 'record' | 'jobs' | 'result' | 'prompts' | 'settings';
+  currentPage: 'record' | 'result' | 'prompts' | 'settings' | 'stt';
   isLoading: boolean;
   sidebarCollapsed: boolean;
   
