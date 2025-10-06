@@ -82,17 +82,7 @@ export const JobCard: React.FC<JobCardProps> = ({
         </div>
       )}
 
-      {/* Audio File Info */}
-      {job.audioFile && (
-        <div className="mb-3 text-xs text-gray-500">
-          <span className="inline-flex items-center">
-            <svg className="w-3 h-3 mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M7 4V2a1 1 0 011-1h8a1 1 0 011 1v2h4a1 1 0 110 2h-1v14a2 2 0 01-2 2H6a2 2 0 01-2-2V6H3a1 1 0 110-2h4zM9 6h6v12H9V6z" />
-            </svg>
-            {job.audioFile}
-          </span>
-        </div>
-      )}
+      {/* 不顯示本機檔案路徑（避免洩露與版面干擾） */}
 
       {/* Progress Bar for Processing */}
       {(job.status === 'queued' || job.status === 'stt' || job.status === 'summarize') && (

@@ -2956,9 +2956,7 @@ ${summarySection}${transcriptSection}`;
                         </button>
                       </div>
                       <div className="result-card__meta">完成時間：{job.createdAt}</div>
-                      {job.audioFile && (
-                        <div className="result-card__meta" title={job.audioFile}><Icon name="file" /> {job.audioFile}</div>
-                      )}
+                      {/* 統一不顯示本機檔案路徑，避免洩露/過長干擾版面 */}
                       {snippet && (
                         <p className="result-card__snippet">{snippet}</p>
                       )}
