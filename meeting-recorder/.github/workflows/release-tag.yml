@@ -1,0 +1,70 @@
+name: Release v1.1.6 (macOS + Windows)
+
+on:
+  push:
+    tags:
+      - v1.1.6
+
+jobs:
+  build-matrix:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Enable corepack
+        run: corepack enable
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Fetch ffmpeg/ffprobe (Windows only)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $ffDir = "resources/ffmpeg/win32-x64"
+          New-Item -ItemType Directory -Force -Path $ffDir | Out-Null
+          $zipUrl = "https://www.gyan.dev/ffmpeg/builds/packages/ffmpeg-6.1.1-essentials_build.zip"
+          $zipPath = "$env:RUNNER_TEMP/ffmpeg.zip"
+          Invoke-WebRequest -Uri $zipUrl -OutFile $zipPath
+          Expand-Archive -Path $zipPath -DestinationPath $env:RUNNER_TEMP/ffmpeg -Force
+          $bin = Get-ChildItem -Recurse "$env:RUNNER_TEMP/ffmpeg" -Filter ffmpeg.exe | Select-Object -First 1
+          $probe = Get-ChildItem -Recurse "$env:RUNNER_TEMP/ffmpeg" -Filter ffprobe.exe | Select-Object -First 1
+          if (-not $bin -or -not $probe) { throw "ffmpeg/ffprobe not found in downloaded archive" }
+          Copy-Item $bin.FullName "$ffDir/ffmpeg.exe" -Force
+          Copy-Item $probe.FullName "$ffDir/ffprobe.exe" -Force
+
+      - name: Build
+        run: npm run build
+
+      - name: Pack OS target
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if [ "$RUNNER_OS" = "Windows" ]; then \
+            npm run dist -- --win ; \
+          else \
+            npm run dist:mac ; \
+          fi
+        shell: bash
+
+      - name: Upload release assets (overwrite)
+        uses: svenstaro/upload-release-action@v2
+        with:
+          repo_token: ${{ secrets.GITHUB_TOKEN }}
+          tag: v1.1.6
+          file: release/*
+          file_glob: true
+          overwrite: true
+
