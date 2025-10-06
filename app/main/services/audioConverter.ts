@@ -62,6 +62,11 @@ export class AudioConverterService {
           path.join(__dirname, '..', '..', '..', 'resources', 'ffmpeg', 'win32-x64', 'ffmpeg.exe'),
           'ffmpeg'
         ];
+        const possibleProbePaths = [
+          path.join(process.resourcesPath, 'ffmpeg', 'win32-x64', 'ffprobe.exe'),
+          path.join(__dirname, '..', '..', '..', 'resources', 'ffmpeg', 'win32-x64', 'ffprobe.exe'),
+          'ffprobe'
+        ];
         for (const pth of possiblePaths) {
           if (pth !== 'ffmpeg' && fs.existsSync(pth)) {
             ffmpeg.setFfmpegPath(pth);
@@ -69,6 +74,15 @@ export class AudioConverterService {
           }
           if (pth === 'ffmpeg') {
             try { ffmpeg.setFfmpegPath('ffmpeg'); } catch {}
+          }
+        }
+        for (const pth of possibleProbePaths) {
+          if (pth !== 'ffprobe' && fs.existsSync(pth)) {
+            (ffmpeg as any).setFfprobePath?.(pth);
+            break;
+          }
+          if (pth === 'ffprobe') {
+            try { (ffmpeg as any).setFfprobePath?.('ffprobe'); } catch {}
           }
         }
       } catch (e) {
