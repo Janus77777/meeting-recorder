@@ -258,6 +258,7 @@ const App: React.FC = () => {
   
   // 追蹤正在處理的轉錄任務，防止重複執行
   const [processingJobs, setProcessingJobs] = useState<Set<string>>(new Set());
+  const [showRawStt, setShowRawStt] = useState(false);
   
   // 結果頁面的分頁狀態
   const [currentJobIndex, setCurrentJobIndex] = useState(0);
@@ -1986,6 +1987,25 @@ const App: React.FC = () => {
       const combinedTranscriptRaw = transcriptSegments.join('\n\n');
       console.log('Gemini 逐字稿合併完成');
 
+      // 準備前半段 STT 原始文字（0 → T/2），供調適用
+      try {
+        const halfBoundary = Math.max(1, Math.floor((progressEstRef.current[jobId]?.totalSeconds || totalSecondsForDirect) / 2));
+        let acc = 0;
+        let cutoffIndex = 0;
+        for (let i = 0; i < segments.length; i++) {
+          const d = segments[i].duration || (segments[i].end - segments[i].start) || 0;
+          acc += Math.max(0, d);
+          if (acc >= halfBoundary) { cutoffIndex = i; break; }
+        }
+        const sttFirstHalfText = transcriptSegments.slice(0, cutoffIndex + 1).join('\n\n');
+        updateJob(jobId, {
+          debugRaw: {
+            sttFirstHalfText,
+            totalDuration: totalSecondsForDirect
+          }
+        });
+      } catch {}
+
       const cleanedTranscript = await cleanupTranscriptInChunks(
         geminiClient,
         combinedTranscriptRaw,
@@ -2925,6 +2945,37 @@ ${summarySection}${transcriptSection}`;
                         <TodosCardKit items={todosData} />
                       </div>
                       <TimelineCardKit items={timelineData} onJump={handleJumpToTranscript} />
+                      {(process.env.NODE_ENV === 'development' || settings.geminiDiagnosticMode) && currentJob.debugRaw?.sttFirstHalfText && (
+                        <section className="rounded-2xl border border-[#E2E8F0] bg-white p-4 shadow-[0_18px_40px_-24px_rgba(15,23,42,0.18)] mt-2">
+                          <div className="flex items-center justify-between">
+                            <h4 className="text-[#0F172A] font-semibold">STT 原始逐字稿（前半）</h4>
+                            <div className="flex gap-2">
+                              <button className="btn btn--surface" onClick={() => setShowRawStt(v => !v)}>{showRawStt ? '收合' : '查看'}</button>
+                              {showRawStt && (
+                                <>
+                                  <button className="btn btn--surface" onClick={() => window.electronAPI?.clipboard?.writeText?.(currentJob.debugRaw?.sttFirstHalfText || '')}>複製</button>
+                                  <button className="btn btn--surface" onClick={() => {
+                                    const blob = new Blob([currentJob.debugRaw?.sttFirstHalfText || ''], { type: 'text/plain;charset=utf-8' });
+                                    const url = URL.createObjectURL(blob);
+                                    const a = document.createElement('a');
+                                    a.href = url;
+                                    a.download = `${currentJob.filename.replace(/\.[^/.]+$/, '')}-stt-first-half.txt`;
+                                    document.body.appendChild(a);
+                                    a.click();
+                                    URL.revokeObjectURL(url);
+                                    a.remove();
+                                  }}>下載</button>
+                                </>
+                              )}
+                            </div>
+                          </div>
+                          {showRawStt && (
+                            <pre style={{ marginTop: 8, whiteSpace: 'pre-wrap', fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, Liberation Mono, monospace', fontSize: 13, color: '#334155' }}>
+                              {currentJob.debugRaw?.sttFirstHalfText || '（無）'}
+                            </pre>
+                          )}
+                        </section>
+                      )}
                       <div className="flex justify-end mt-2">
                         <button className="btn btn--surface" onClick={async () => {
                           try {

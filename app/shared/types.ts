@@ -90,6 +90,11 @@ export interface MeetingJob {
   summary?: string;
   // 由模型從逐字稿分段推得的大綱時間軸（供摘要頁點擊跳轉使用）
   timelineItems?: Array<{ time?: string; timeRange?: string; item: string; desc?: string }>;
+  // 調適用原始資料（僅開發/診斷用）
+  debugRaw?: {
+    sttFirstHalfText?: string;
+    totalDuration?: number;
+  };
   progressMessage?: string;
   errorMessage?: string;
 }
