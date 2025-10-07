@@ -55,6 +55,7 @@ export interface ElectronAPI {
   dialog: {
     openFile: () => Promise<{ canceled: boolean; filePath?: string }>;
     openDirectory: () => Promise<{ canceled: boolean; directoryPath?: string }>;
+    message?: (type: 'none'|'info'|'error'|'warning'|'question', title: string, message: string, buttons?: string[]) => Promise<{ response: number }>;
   };
 
   // Clipboard methods
