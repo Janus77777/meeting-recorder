@@ -1198,14 +1198,15 @@ const App: React.FC = () => {
           const reason = systemResult.error || '無法獲取系統聲音來源';
           console.error('❌ 系統聲音擷取失敗:', reason);
           if (/Requested device not found/i.test(reason)) {
-            const friendlyMessage = 'macOS 目前未提供系統音訊輸出來源；若需錄製系統聲音，請安裝虛擬音訊驅動（如 BlackHole 或 Loopback）並在偏好設定中授權。';
+            const friendlyMessage = 'macOS 目前未提供可錄製的系統音訊輸出；如需錄製系統聲音，請安裝虛擬音訊驅動（如 BlackHole/Loopback）並於偏好設定授權。';
             setRecordingStatus(`系統聲音擷取失敗：${friendlyMessage}`);
-            alert(friendlyMessage);
+            window.electronAPI?.dialog?.message?.('error', '系統聲音擷取失敗', friendlyMessage, ['知道了']);
           } else if (/權限|允許|授權/.test(reason)) {
             setRecordingStatus(`系統聲音擷取失敗：${reason}`);
             await openSystemPreference('screen');
           } else {
             setRecordingStatus(`系統聲音擷取失敗：${reason}`);
+            window.electronAPI?.dialog?.message?.('error', '系統聲音擷取失敗', reason, ['知道了']);
           }
           throw new Error(reason);
         } else {
@@ -1356,8 +1357,9 @@ const App: React.FC = () => {
       console.log('開始錄音，MediaRecorder 狀態:', recorder.state);
     } catch (error) {
       console.error('啟動錄音失敗:', error);
-      setRecordingStatus('啟動錄音失敗：' + (error as Error).message);
-      alert('錄音啟動失敗：' + (error as Error).message);
+      const msg = (error as Error).message || String(error);
+      setRecordingStatus('啟動錄音失敗：' + msg);
+      window.electronAPI?.dialog?.message?.('error', '錄音啟動失敗', msg, ['知道了']);
       activeStreams.forEach(stream => stopStream(stream));
       setSystemStream(null);
       setMicrophoneStream(null);

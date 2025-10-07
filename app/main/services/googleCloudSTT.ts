@@ -111,7 +111,7 @@ export class GoogleCloudSTTService {
         hasFeature = true;
       }
 
-      // 既定開啟：自動標點
+      // 既定開啟：自動標點（v2 RecognitionFeatures）
       try {
         (result as any).enableAutomaticPunctuation = true;
         hasFeature = true;
@@ -157,7 +157,8 @@ export class GoogleCloudSTTService {
       hasFeatures: !!features,
       languageCodes: recognitionConfig.languageCodes,
       diarization: !!features?.diarizationConfig,
-      enableWordTimeOffsets: !!features?.enableWordTimeOffsets
+      enableWordTimeOffsets: !!features?.enableWordTimeOffsets,
+      enableAutomaticPunctuation: (features as any)?.enableAutomaticPunctuation === true
     });
 
     let response: RecognizeResponse;
@@ -187,6 +188,8 @@ export class GoogleCloudSTTService {
         if (featuresFallback && 'enableWordTimeOffsets' in featuresFallback) {
           delete featuresFallback.enableWordTimeOffsets;
         }
+        // 仍然強制保留自動標點
+        featuresFallback.enableAutomaticPunctuation = true;
         const request2: RecognizeRequest = {
           ...request,
           config: { ...recognitionConfig, features: featuresFallback }

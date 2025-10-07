@@ -202,6 +202,18 @@ class MeetingRecorderApp {
       return { canceled: false, directoryPath: result.filePaths[0] };
     });
 
+    // 顯示訊息對話框（錯誤/資訊）
+    ipcMain.handle('dialog:message', async (_event, options: { type?: 'none'|'info'|'error'|'warning'|'question'; title?: string; message: string; buttons?: string[] }) => {
+      const win = this.mainWindow || BrowserWindow.getFocusedWindow();
+      const result = await dialog.showMessageBox(win!, {
+        type: options.type || 'info',
+        title: options.title || '訊息',
+        message: options.message,
+        buttons: options.buttons || ['確定']
+      });
+      return { response: result.response };
+    });
+
     // Desktop capturer for system audio
     ipcMain.handle('desktopCapturer:getAudioSources', async () => {
       try {

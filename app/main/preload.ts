@@ -182,7 +182,9 @@ const electronAPI: ElectronAPI = {
   getAudioSources: () => ipcRenderer.invoke('desktopCapturer:getAudioSources'),
   dialog: {
     openFile: () => ipcRenderer.invoke('dialog:openFile'),
-    openDirectory: () => ipcRenderer.invoke('dialog:openDirectory')
+    openDirectory: () => ipcRenderer.invoke('dialog:openDirectory'),
+    message: (type: 'none'|'info'|'error'|'warning'|'question', title: string, message: string, buttons?: string[]) =>
+      ipcRenderer.invoke('dialog:message', { type, title, message, buttons })
   },
 
 };
