@@ -292,6 +292,7 @@ const App: React.FC = () => {
   const [transcriptQuery, setTranscriptQuery] = useState('');
   const [transcriptSpeaker, setTranscriptSpeaker] = useState('');
   const [showRawSummary, setShowRawSummary] = useState(false);
+  const timelineRequestedRef = useRef<Set<string>>(new Set());
 
   const cancelRecordingRef = React.useRef(false);
   const hasResetStaleJobsRef = React.useRef(false);
@@ -743,6 +744,31 @@ const App: React.FC = () => {
       diagnosticMode: currentSettings.geminiDiagnosticMode
     });
   };
+
+  // 若進入結果檢視且當前作業缺少時間軸，嘗試自動生成一次（靜默）
+  React.useEffect(() => {
+    const job = useJobsStore.getState().currentJob;
+    if (!job) return;
+    if (!job.transcriptSegments || job.transcriptSegments.length === 0) return;
+    const hasTl = Array.isArray(job.timelineItems) && job.timelineItems.length > 0;
+    const already = timelineRequestedRef.current.has(job.id);
+    if (hasTl || already) return;
+    timelineRequestedRef.current.add(job.id);
+    (async () => {
+      try {
+        const client = getGeminiApiClient();
+        const tl = await client.generateTimelineOutline(
+          (job.transcriptSegments || []).map(s => ({ start: typeof s.start === 'number' ? s.start : 0, end: typeof s.end === 'number' ? s.end : undefined, text: s.text }))
+        );
+        if (Array.isArray(tl) && tl.length > 0) {
+          const normalized = tl.map((t: any) => ({ time: t.time, item: t.item, desc: t.desc || '' }));
+          updateJob(job.id, { timelineItems: normalized as any });
+        }
+      } catch (e) {
+        console.warn('自動生成時間軸失敗（忽略）：', e);
+      }
+    })();
+  }, [useJobsStore.getState().currentJob?.id]);
 
   const getBlobDuration = (blob: Blob): Promise<number> => {
     return new Promise((resolve, reject) => {
@@ -1813,7 +1839,10 @@ const App: React.FC = () => {
       let formattedSegments: TranscriptSegment[] = [];
       let transcriptFromSegments = '';
 
-      if (aggregatedSegments.length > 0) {
+      // 若模型不提供詞級時間戳（常見於 chirp_3），聚合結果可能全部缺少 start/end。
+      // 這種情況下使用切段邊界回退，避免出現 00:00 - 00:00。
+      const hasValidWordTimestamps = aggregatedSegments.some(w => typeof w.startTime === 'number' || typeof w.endTime === 'number');
+      if (aggregatedSegments.length > 0 && hasValidWordTimestamps) {
         const built = buildTranscriptFromSTTSegments(aggregatedSegments);
         formattedSegments = built.formattedSegments;
         transcriptFromSegments = built.text;

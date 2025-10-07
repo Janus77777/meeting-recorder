@@ -1008,7 +1008,7 @@ ${transcriptText}`;
   }
 
   // 產生「標題式大綱 + 時間軸」：
-  // 輸入為已整理的逐字稿分段（含數字秒數 start/end 與文字 text），輸出 JSON 陣列：
+  // 輸入為已整理的逐字稿分段（含數字秒數 start/end 與文字 text），輸出嚴格 JSON 陣列：
   // [{ "time": "MM:SS", "item": "段落標題", "desc": "一句話摘要" }, ...]
   async generateTimelineOutline(segments: Array<{ start: number | string; end?: number | string; text: string }>) {
     // 將分段壓縮為帶時間標記的純文字，避免超長
@@ -1024,14 +1024,17 @@ ${transcriptText}`;
     const MAX_ITEMS = 180; // 安全上限
     const slim = segments.slice(0, MAX_ITEMS).map(s => `[${toTs(s.start)}] ${s.text?.slice(0, 240)}`);
 
-    const prompt = `你是一個專業的逐字稿編輯，請依下列帶時間標記的對話分段，產生「可點擊的時間軸」的標題式大綱：
+    const prompt = `你是一個專業的逐字稿編輯。請根據帶時間標記的分段資料，產生「可點擊的時間軸」標題式大綱。
 
-要求：
-1) 以重大語義變化為界，自行合併鄰近句，產出 6–12 個節點；
-2) 每個節點輸出 JSON 物件：{"time":"MM:SS","item":"標題","desc":"一句話摘要"}；time 請取該段落起始時間；
-3) 只輸出 JSON 陣列，不要任何說明文字；
+嚴格輸出規格（務必遵守）：
+- 僅輸出一個 JSON 陣列，且陣列長度 6–12。
+- 陣列每個元素為物件，必含欄位：
+  {"time":"MM:SS","item":"標題","desc":"一句話摘要"}
+- time 必須是 MM:SS（取該節點對應段落的起始時間）。不得輸出文字、括號、中文字串，亦不得缺欄位。
+- item 與 desc 為純文字，不得含 Markdown、HTML、換行或多餘符號。
+- 嚴禁在 JSON 之外輸出任何說明文字或標點。
 
-資料：\n${slim.join('\n')}`;
+參考分段（[MM:SS] 文字，最多 ${MAX_ITEMS} 行）：\n${slim.join('\n')}`;
 
     return this.executeWithFallback(async (model: string) => {
       const generateUrl = `${this.baseURL}/models/${model}:generateContent?key=${this.apiKey}`;
