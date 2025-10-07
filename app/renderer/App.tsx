@@ -259,6 +259,7 @@ const App: React.FC = () => {
   // 追蹤正在處理的轉錄任務，防止重複執行
   const [processingJobs, setProcessingJobs] = useState<Set<string>>(new Set());
   const [showRawStt, setShowRawStt] = useState(false);
+  const [transcriptCompareMode, setTranscriptCompareMode] = useState<'cleaned'|'raw'|'split'>('cleaned');
   
   // 結果頁面的分頁狀態
   const [currentJobIndex, setCurrentJobIndex] = useState(0);
@@ -1777,6 +1778,25 @@ const App: React.FC = () => {
 
       let finalTranscript = transcriptParts.join('\n\n').trim();
 
+      // 保存前半段原始 STT 文字（供調適用）
+      try {
+        const halfBoundary = Math.max(1, Math.floor((progressEstRef.current[jobId]?.totalSeconds || totalSecondsForStt) / 2));
+        let acc = 0;
+        let cutoffIndex = 0;
+        for (let i = 0; i < sttSegments.length; i++) {
+          const d = sttSegments[i].duration || (sttSegments[i].end - sttSegments[i].start) || 0;
+          acc += Math.max(0, d);
+          if (acc >= halfBoundary) { cutoffIndex = i; break; }
+        }
+        const sttFirstHalfText = transcriptParts.slice(0, cutoffIndex + 1).join('\n\n');
+        updateJob(jobId, {
+          debugRaw: {
+            sttFirstHalfText,
+            totalDuration: totalSecondsForStt
+          }
+        });
+      } catch {}
+
       if (!finalTranscript) {
         finalTranscript = transcriptFromSegments;
       }
@@ -2888,6 +2908,32 @@ ${summarySection}${transcriptSection}`;
                       );
                     }
                     if (currentJob.transcriptSegments && currentJob.transcriptSegments.length > 0) {
+                      const hasRaw = !!currentJob.debugRaw?.sttFirstHalfText;
+                      const RawPane = (
+                        <div style={{ whiteSpace: 'pre-wrap', lineHeight: 1.7, fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, Liberation Mono, monospace', fontSize: 13, color: '#334155' }}>
+                          {currentJob.debugRaw?.sttFirstHalfText || '（無原始 STT 資料）'}
+                        </div>
+                      );
+                      const CleanedPane = (
+                        <div className="result-transcript-list" ref={transcriptContainerRef}>
+                          {currentJob.transcriptSegments
+                            .filter(seg => (transcriptSpeaker ? seg.speaker === transcriptSpeaker : true))
+                            .filter(seg => (transcriptQuery ? (seg.text?.toLowerCase()?.includes(transcriptQuery.toLowerCase())) : true))
+                            .map((segment, idx) => {
+                              const startLabel = typeof segment.start === 'number' ? formatSecondsToTimestamp(segment.start) : (segment.start as string) ?? '--:--';
+                              const endLabel = typeof segment.end === 'number' ? formatSecondsToTimestamp(segment.end) : (segment.end as string) ?? '--:--';
+                              return (
+                                <div ref={(el) => { transcriptItemRefs.current[idx] = el; }} key={`${segment.start}-${segment.end}-${idx}`} className="transcript-item">
+                                  <div>
+                                    <div className="transcript-item__speaker">{segment.speaker}</div>
+                                    <div className="transcript-item__time">{startLabel} - {endLabel}</div>
+                                  </div>
+                                  <div style={{ flex: 1 }}>{segment.text}</div>
+                                </div>
+                              );
+                            })}
+                        </div>
+                      );
                       return (
                         <div>
                           <TranscriptToolbarKit
@@ -2912,24 +2958,30 @@ ${summarySection}${transcriptSection}`;
                               a.remove();
                             }}
                           />
-                          <div className="result-transcript-list" ref={transcriptContainerRef}>
-                            {currentJob.transcriptSegments
-                              .filter(seg => (transcriptSpeaker ? seg.speaker === transcriptSpeaker : true))
-                              .filter(seg => (transcriptQuery ? (seg.text?.toLowerCase()?.includes(transcriptQuery.toLowerCase())) : true))
-                              .map((segment, idx) => {
-                                const startLabel = typeof segment.start === 'number' ? formatSecondsToTimestamp(segment.start) : (segment.start as string) ?? '--:--';
-                                const endLabel = typeof segment.end === 'number' ? formatSecondsToTimestamp(segment.end) : (segment.end as string) ?? '--:--';
-                                return (
-                                  <div ref={(el) => { transcriptItemRefs.current[idx] = el; }} key={`${segment.start}-${segment.end}-${idx}`} className="transcript-item">
-                                    <div>
-                                      <div className="transcript-item__speaker">{segment.speaker}</div>
-                                      <div className="transcript-item__time">{startLabel} - {endLabel}</div>
-                                    </div>
-                                    <div style={{ flex: 1 }}>{segment.text}</div>
-                                  </div>
-                                );
-                              })}
-                          </div>
+                          {hasRaw && (
+                            <div className="flex items-center gap-2 mb-3">
+                              <span className="text-sm text-[#64748B]">視圖：</span>
+                              <div className="flex bg-[#F1F5F9] rounded-xl p-1 shadow-inner">
+                                <button onClick={() => setTranscriptCompareMode('cleaned')} className={`px-3 py-1.5 rounded-lg text-sm ${transcriptCompareMode==='cleaned'?'bg-white text-[#0F172A] shadow':'text-[#64748B]'}`}>修正後</button>
+                                <button onClick={() => setTranscriptCompareMode('raw')} className={`px-3 py-1.5 rounded-lg text-sm ${transcriptCompareMode==='raw'?'bg-white text-[#0F172A] shadow':'text-[#64748B]'}`}>原始</button>
+                                <button onClick={() => setTranscriptCompareMode('split')} className={`px-3 py-1.5 rounded-lg text-sm ${transcriptCompareMode==='split'?'bg-white text-[#0F172A] shadow':'text-[#64748B]'}`}>對照</button>
+                              </div>
+                            </div>
+                          )}
+                          {transcriptCompareMode === 'cleaned' && CleanedPane}
+                          {transcriptCompareMode === 'raw' && RawPane}
+                          {transcriptCompareMode === 'split' && (
+                            <div className="grid grid-cols-2 gap-4">
+                              <section className="rounded-2xl border border-[#E2E8F0] bg-white p-3 shadow-[0_12px_28px_-20px_rgba(15,23,42,0.18)]">
+                                <h5 className="text-[#334155] font-semibold mb-2">原始 STT（前半）</h5>
+                                <div style={{ maxHeight: 520, overflow: 'auto' }}>{RawPane}</div>
+                              </section>
+                              <section className="rounded-2xl border border-[#E2E8F0] bg-white p-3 shadow-[0_12px_28px_-20px_rgba(15,23,42,0.18)]">
+                                <h5 className="text-[#334155] font-semibold mb-2">Gemini 修正後</h5>
+                                <div style={{ maxHeight: 520, overflow: 'auto' }}>{CleanedPane}</div>
+                              </section>
+                            </div>
+                          )}
                         </div>
                       );
                     }
