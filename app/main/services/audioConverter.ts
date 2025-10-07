@@ -212,7 +212,21 @@ export class AudioConverterService {
           reject(error);
           return;
         }
-        const duration = metadata.format?.duration ?? 0;
+        // 主要來源：format.duration；後備：streams 的 duration 或 nb_frames/sample_rate 換算
+        let duration = Number(metadata.format?.duration ?? 0);
+        if (!Number.isFinite(duration) || duration <= 0) {
+          const streams: any[] = Array.isArray((metadata as any).streams) ? (metadata as any).streams : [];
+          for (const s of streams) {
+            const d1 = Number(s.duration ?? 0);
+            if (Number.isFinite(d1) && d1 > 0) { duration = Math.max(duration, d1); }
+            const nbFrames = Number(s.nb_frames ?? 0);
+            const r = Number(s.sample_rate ?? s.sampleRate ?? 0);
+            if (Number.isFinite(nbFrames) && nbFrames > 0 && Number.isFinite(r) && r > 0) {
+              const d2 = nbFrames / r;
+              if (Number.isFinite(d2) && d2 > 0) duration = Math.max(duration, d2);
+            }
+          }
+        }
         resolve(duration);
       });
     });

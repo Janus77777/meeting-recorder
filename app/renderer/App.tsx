@@ -196,19 +196,22 @@ const mergeSegmentsWithCleanTranscript = (
     const segment = segments[i];
     const line = parsedLines[i];
     merged.push({
-      ...segment,
+      // 僅覆寫 speaker/text，不動時間戳，確保 1:1 對齊
+      start: segment.start,
+      end: segment.end,
       speaker: line.speaker ?? segment.speaker,
       text: line.text
     });
   }
 
   if (parsedLines.length > segments.length) {
-    const lastEnd = merged[merged.length - 1]?.end ?? '--:--';
+    const lastEnd = merged[merged.length - 1]?.end ?? 0;
     for (let i = segments.length; i < parsedLines.length; i++) {
       const line = parsedLines[i];
       merged.push({
-        start: lastEnd ?? '--:--',
-        end: '--:--',
+        // 新增的行：以上一段 end 作為 start，end 暫缺（渲染時會顯示 --:--）
+        start: typeof lastEnd === 'number' ? lastEnd : 0,
+        end: undefined as any,
         speaker: line.speaker ?? 'Speaker',
         text: line.text
       });
@@ -1643,7 +1646,16 @@ const App: React.FC = () => {
       const preparedWavPath = prepareResult.wavPath;
       cleanupPaths.push(preparedWavPath);
 
-      const sttSegments = createSTTAudioSegments(audioBlob, originalChunks, prepareResult.durationSeconds ?? durationSeconds);
+      // 決定切段所用的總時長：以主程序 ffprobe 回傳為主，後備以 <audio> 估算
+      let durationForSegments = prepareResult.durationSeconds && prepareResult.durationSeconds > 0
+        ? prepareResult.durationSeconds
+        : (durationSeconds || 0);
+      if (!durationForSegments || durationForSegments <= 0) {
+        try {
+          durationForSegments = await getBlobDuration(audioBlob);
+        } catch {}
+      }
+      const sttSegments = createSTTAudioSegments(audioBlob, originalChunks, Math.max(1, Math.floor(durationForSegments)));
       console.log('📼 Google STT 分段資訊:', sttSegments.map(s => ({ index: s.index + 1, duration: s.duration })));
 
       const aggregatedSegments: STTTranscriptSegment[] = [];
@@ -2864,6 +2876,19 @@ ${summarySection}${transcriptSection}`;
                         <TodosCardKit items={todosData} />
                       </div>
                       <TimelineCardKit items={timelineData} onJump={handleJumpToTranscript} />
+                      <div className="flex justify-end mt-2">
+                        <button className="btn btn--surface" onClick={async () => {
+                          try {
+                            const tl = await geminiClient.generateTimelineOutline(
+                              (currentJob.transcriptSegments || []).map(s => ({ start: typeof s.start === 'number' ? s.start : 0, end: typeof s.end === 'number' ? s.end : undefined, text: s.text }))
+                            );
+                            const normalized = tl.map((t: any, i: number) => ({ id: String(i + 1), time: t.time, title: t.item, description: t.desc || '' }));
+                            updateJob(currentJob.id, { timelineItems: normalized });
+                          } catch (e) {
+                            console.warn('重跑時間軸失敗:', e);
+                          }
+                        }}>重跑時間軸</button>
+                      </div>
                       <section className="rounded-2xl border border-[#E2E8F0] bg-white p-4 shadow-[0_18px_40px_-24px_rgba(15,23,42,0.18)]">
                         <div className="flex items-center justify-between">
                           <h4 className="text-[#0F172A] font-semibold">模型原始摘要（Markdown）</h4>
