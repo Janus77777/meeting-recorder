@@ -91,12 +91,12 @@
       ]
     },
     {
-      "from": "resources/credentials/google-stt.json",
-      "to": "credentials/google-stt.json",
+      "from": "resources/credentials",
+      "to": "credentials",
       "filter": [
         "**/*"
-        ]
-      }
+      ]
+    }
     ],
     "mac": {
       "category": "public.app-category.productivity",
