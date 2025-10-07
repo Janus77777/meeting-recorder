@@ -343,7 +343,7 @@ export const useToastStore = create<ToastState>((set, get) => ({
 
 // UI State Store
 interface UIState {
-  currentPage: 'record' | 'result' | 'prompts' | 'settings' | 'stt';
+  currentPage: 'record' | 'result' | 'prompts' | 'settings' | 'stt' | 'sttDebug';
   isLoading: boolean;
   sidebarCollapsed: boolean;
   

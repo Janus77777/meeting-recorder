@@ -3205,7 +3205,7 @@ ${summarySection}${transcriptSection}`;
   return (
     <div className="app-shell">
       <SimpleNavigation
-        currentPage={currentPage === 'stt' ? 'settings' : currentPage}
+        currentPage={(currentPage === 'stt' || currentPage === 'sttDebug') ? 'settings' : currentPage}
         onPageChange={setCurrentPage as any}
         jobCount={jobs.length}
         activeJobCount={activeJobCountValue}
