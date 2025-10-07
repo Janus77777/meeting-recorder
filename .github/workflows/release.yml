@@ -21,10 +21,14 @@ jobs:
           npm ci
       - name: Build app
         run: npm run build
-      - name: Build mac artifacts (DMG + ZIP) and publish
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: npx electron-builder --mac --publish always
+      - name: Build mac artifacts (DMG + ZIP) and publish (retry)
+        uses: nick-fields/retry@v3
+        with:
+          timeout_minutes: 30
+          max_attempts: 2
+          command: |
+            export GH_TOKEN=${{ secrets.GITHUB_TOKEN }}
+            npx electron-builder --mac --publish always
       - name: Upload mac artifacts
         uses: actions/upload-artifact@v4
         with:
@@ -61,13 +65,16 @@ jobs:
           Copy-Item $probe.FullName "$ffDir/ffprobe.exe" -Force
       - name: Build (pack)
         run: npm run build
-      - name: Build Windows installer (NSIS) and publish
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: npx electron-builder --win --publish always
+      - name: Build Windows installer (NSIS) and publish (retry)
+        uses: nick-fields/retry@v3
+        with:
+          timeout_minutes: 45
+          max_attempts: 2
+          command: |
+            set GH_TOKEN=${{ secrets.GITHUB_TOKEN }}
+            npx electron-builder --win --publish always
       - name: Upload windows artifacts
         uses: actions/upload-artifact@v4
         with:
           name: windows-release
           path: release/*.{exe,yml}
-
