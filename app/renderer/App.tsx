@@ -244,6 +244,14 @@ const App: React.FC = () => {
   const [microphoneStream, setMicrophoneStream] = useState<MediaStream | null>(null);
   const isRecordingRef = useRef(false);
   const startWatchdogRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // 清除錄音啟動看門狗，避免成功錄音後延遲誤彈錯誤窗
+  const clearStartWatchdog = () => {
+    if (startWatchdogRef.current) {
+      clearTimeout(startWatchdogRef.current);
+      startWatchdogRef.current = null;
+    }
+  };
   const [recordings, setRecordings] = useState<Array<{
     id: string;
     filename: string;
@@ -1255,9 +1263,16 @@ const App: React.FC = () => {
       console.log('最終音訊串流，軌道數:', finalStream.getAudioTracks().length);
 
       const recorder = new MediaRecorder(finalStream);
+
+      // 錄音器開始事件：一旦開始就清除啟動看門狗
+      recorder.onstart = () => {
+        clearStartWatchdog();
+      };
       const chunks: Blob[] = [];
       
       recorder.ondataavailable = (event) => {
+        // 收到第一個音訊片段即可視為成功開始，清除看門狗
+        clearStartWatchdog();
         if (event.data.size > 0) {
           chunks.push(event.data);
           console.log('收到音訊數據:', event.data.size, '位元組');
@@ -1265,6 +1280,8 @@ const App: React.FC = () => {
       };
 
       recorder.onstop = async () => {
+        // 停止時再保險清一次，避免短錄音在6秒內結束造成誤彈
+        clearStartWatchdog();
         console.log('錄音停止，總共', chunks.length, '個音訊片段');
         const wasCancelled = cancelRecordingRef.current;
 
@@ -1374,7 +1391,7 @@ const App: React.FC = () => {
       activeStreams.forEach(stream => stopStream(stream));
       setSystemStream(null);
       setMicrophoneStream(null);
-      if (startWatchdogRef.current) { clearTimeout(startWatchdogRef.current); startWatchdogRef.current = null; }
+      clearStartWatchdog();
       isRecordingRef.current = false;
     }
   };
@@ -1386,6 +1403,8 @@ const App: React.FC = () => {
     }
 
     cancelRecordingRef.current = true;
+    // 使用者主動取消，清除啟動看門狗避免誤彈
+    clearStartWatchdog();
     setRecordingStatus('正在取消錄音...');
     try {
       mediaRecorder.stop();
@@ -1408,6 +1427,8 @@ const App: React.FC = () => {
   const stopRecording = () => {
     if (mediaRecorder && mediaRecorder.state === 'recording') {
       console.log('正在停止錄音...');
+      // 停止時一律清掉啟動看門狗，避免短錄音結束後才觸發
+      clearStartWatchdog();
       mediaRecorder.stop();
       setIsRecording(false);
       isRecordingRef.current = false;
