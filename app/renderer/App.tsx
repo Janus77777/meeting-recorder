@@ -242,6 +242,8 @@ const App: React.FC = () => {
   const [recordingMode, setRecordingMode] = useState<'microphone' | 'system' | 'both'>('both'); // 錄音模式
   const [systemStream, setSystemStream] = useState<MediaStream | null>(null);
   const [microphoneStream, setMicrophoneStream] = useState<MediaStream | null>(null);
+  const isRecordingRef = useRef(false);
+  const startWatchdogRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [recordings, setRecordings] = useState<Array<{
     id: string;
     filename: string;
@@ -1156,6 +1158,16 @@ const App: React.FC = () => {
     let finalStream: MediaStream | null = null;
 
     try {
+      // 啟動看門狗：若 6 秒內沒有真正開始錄音，就彈一次錯誤視窗
+      if (startWatchdogRef.current) clearTimeout(startWatchdogRef.current);
+      startWatchdogRef.current = setTimeout(() => {
+        if (!isRecordingRef.current) {
+          const hint = recordingMode === 'system' || recordingMode === 'both'
+            ? '未能取得可錄製的系統音訊或麥克風音訊。請確認麥克風與螢幕錄製權限，或切換為「麥克風」模式重試。'
+            : '未能取得麥克風音訊。請確認麥克風權限與裝置可用。';
+          window.electronAPI?.dialog?.message?.('error', '無法開始錄音', hint, ['知道了']);
+        }
+      }, 6000);
       setRecordingStatus('正在啟動錄音...');
       
       cancelRecordingRef.current = false;
@@ -1347,6 +1359,7 @@ const App: React.FC = () => {
       setMediaRecorder(recorder);
       recorder.start(1000); // 每秒收集一次數據
       setIsRecording(true);
+      isRecordingRef.current = true;
       setRecordingTime(0);
       
       const modeText = recordingMode === 'both' ? '系統聲音 + 麥克風' : 
@@ -1361,6 +1374,8 @@ const App: React.FC = () => {
       activeStreams.forEach(stream => stopStream(stream));
       setSystemStream(null);
       setMicrophoneStream(null);
+      if (startWatchdogRef.current) { clearTimeout(startWatchdogRef.current); startWatchdogRef.current = null; }
+      isRecordingRef.current = false;
     }
   };
 
@@ -1375,6 +1390,7 @@ const App: React.FC = () => {
     try {
       mediaRecorder.stop();
       setIsRecording(false);
+      isRecordingRef.current = false;
       setMediaRecorder(null);
       setTimeout(() => {
         stopStream(systemStream);
@@ -1394,6 +1410,7 @@ const App: React.FC = () => {
       console.log('正在停止錄音...');
       mediaRecorder.stop();
       setIsRecording(false);
+      isRecordingRef.current = false;
       setMediaRecorder(null);
       console.log('錄音結束，總時長:', formatTime(recordingTime));
       
@@ -2488,7 +2505,7 @@ const App: React.FC = () => {
               <section className="quick-panel">
                 <header className="quick-panel__header">
                   <div>
-                    <h2>快速開始錄音</h2>
+                    <h2>開始錄音</h2>
                     <p>選擇收音模式並啟動智慧轉錄流程。</p>
                   </div>
                   {hasAudioPermission !== true && (
