@@ -236,6 +236,29 @@ export class GoogleCloudSTTService {
       });
     });
 
+    // Fallback: 當模型（如 chirp_3）不回傳詞級時間戳時，使用「句子/語句級」的 resultEndOffset 建立段落
+    if (segments.length === 0 && Array.isArray(response.results) && response.results.length > 0) {
+      let prevEnd = 0;
+      for (const result of response.results as SpeechRecognitionResult[]) {
+        const alt = (result.alternatives ?? [])[0] as SpeechRecognitionAlternative | undefined;
+        const transcript = (alt?.transcript || '').trim();
+        const endSec = result.resultEndOffset ? this.durationToSeconds(result.resultEndOffset) : prevEnd;
+        if (!transcript) {
+          prevEnd = endSec;
+          continue;
+        }
+        const startSec = prevEnd;
+        // 避免 start==end 造成 00:00–00:00，若相等則略微推進 end
+        const safeEnd = endSec > startSec ? endSec : startSec + 0.01;
+        segments.push({
+          text: transcript,
+          startTime: startSec,
+          endTime: safeEnd
+        });
+        prevEnd = safeEnd;
+      }
+    }
+
     return {
       transcript: alternatives.join(' ').trim(),
       segments,
