@@ -14,9 +14,20 @@ interface KitResultHeaderProps {
   showProgress?: boolean;
   progressValue?: number;
   estimatedTime?: string;
+  showDebugButton?: boolean;
+  onOpenDebug?: () => void;
 }
 
-export function KitResultHeader({ fileName, completedTime, currentMode, onModeChange, files = [], onSelectFile, onBack, showProgress = false, progressValue = 0, estimatedTime = '00:00' }: KitResultHeaderProps) {
+export function KitResultHeader({ fileName, completedTime, currentMode, onModeChange, files = [], onSelectFile, onBack, showProgress = false, progressValue = 0, estimatedTime = '00:00', showDebugButton = false, onOpenDebug }: KitResultHeaderProps) {
+  const formatToMinute = (input?: string) => {
+    if (!input) return '';
+    const d = new Date(input);
+    if (!isNaN(d.getTime())) {
+      return d.toLocaleString('zh-TW', { year: 'numeric', month: '2-digit', day: '2-digit', hour: 'numeric', minute: '2-digit' });
+    }
+    // 後備：把 ":ss" 拿掉
+    return input.replace(/(\d{1,2}:\d{2})(?::\d{2})/, '$1');
+  };
   return (
     <div className="sticky top-0 z-20 bg-white/95 backdrop-blur-md border border-[#E2E8F0] rounded-2xl shadow-[0_18px_40px_-24px_rgba(15,23,42,0.18)] mb-3">
       <div className="px-6 py-3 space-y-1.5">
@@ -59,11 +70,22 @@ export function KitResultHeader({ fileName, completedTime, currentMode, onModeCh
           <div className="w-[240px]" />
         </div>
 
+        {/* 追加列：右上角 STT 偵錯按鈕（位於分段切換的上方） */}
+        <div className="flex items-center">
+          <div className="w-[240px]" />
+          <div className="flex-1" />
+          <div className="w-[240px] flex justify-end">
+            {showDebugButton && (
+              <button onClick={onOpenDebug} className="px-3 py-1.5 mb-1 rounded-lg text-sm bg-[#F1F5F9] hover:bg-[#E2E8F0] text-[#0F172A] border border-[#E2E8F0]">STT 偵錯</button>
+            )}
+          </div>
+        </div>
+
         {/* 第 2 列：完成時間（置中） | 模式切換（右） */}
         <div className="flex items-center">
           <div className="w-[240px]" />
           <div className="flex-1 text-center text-[#64748B] text-sm truncate">
-            {completedTime ? `完成時間：${completedTime}` : ''}
+            {completedTime ? `完成時間：${formatToMinute(completedTime)}` : ''}
           </div>
           <div className="w-[240px] flex justify-end">
             <div className="flex bg-[#F1F5F9] rounded-xl p-1.5 shadow-inner">

@@ -7,6 +7,7 @@ import { useSettingsStore, useUIStore, useJobsStore, initializeStores, useToastA
 import PromptsPage from './pages/PromptsPage';
 import { SettingsPage } from './pages/SettingsPage';
 import GoogleSTTSettingsPage from './pages/GoogleSTTSettingsPage';
+import STTDebugPage from './pages/STTDebugPage';
 import SummaryView from './components/SummaryView';
 import ResultHeader from './components/ResultHeader';
 import KitResultHeader from './components/kit/ResultHeader';
@@ -28,7 +29,7 @@ import { mergeMediaStreams, requestMicrophoneStream, requestSystemAudioStream, s
 import { validateMediaFile } from './utils/validators';
 import { joinPath, normalizePath } from './utils/path';
 
-const PAGE_META: Record<'record' | 'result' | 'prompts' | 'settings' | 'stt', { title: string; subtitle: string }> = {
+const PAGE_META: Record<'record' | 'result' | 'prompts' | 'settings' | 'stt' | 'sttDebug', { title: string; subtitle: string }> = {
   record: {
     title: '會議錄音工作室',
     subtitle: '即時錄音或上傳檔案，啟動智慧轉錄流程'
@@ -48,6 +49,10 @@ const PAGE_META: Record<'record' | 'result' | 'prompts' | 'settings' | 'stt', { 
   stt: {
     title: 'Google STT 詳細設定',
     subtitle: '配置專案、辨識器、模型與語言等參數'
+  },
+  sttDebug: {
+    title: 'STT 偵錯對照',
+    subtitle: '檢視原始 STT 與修正後逐字稿的差異'
   }
 };
 
@@ -1778,7 +1783,7 @@ const App: React.FC = () => {
 
       let finalTranscript = transcriptParts.join('\n\n').trim();
 
-      // 保存前半段原始 STT 文字（供調適用）
+      // 保存完整 / 前半段原始 STT 文字（供偵錯用）
       try {
         const halfBoundary = Math.max(1, Math.floor((progressEstRef.current[jobId]?.totalSeconds || totalSecondsForStt) / 2));
         let acc = 0;
@@ -1789,9 +1794,11 @@ const App: React.FC = () => {
           if (acc >= halfBoundary) { cutoffIndex = i; break; }
         }
         const sttFirstHalfText = transcriptParts.slice(0, cutoffIndex + 1).join('\n\n');
+        const sttFullText = transcriptParts.join('\n\n');
         updateJob(jobId, {
           debugRaw: {
             sttFirstHalfText,
+            sttFullText,
             totalDuration: totalSecondsForStt
           }
         });
@@ -2997,37 +3004,7 @@ ${summarySection}${transcriptSection}`;
                         <TodosCardKit items={todosData} />
                       </div>
                       <TimelineCardKit items={timelineData} onJump={handleJumpToTranscript} />
-                      {(process.env.NODE_ENV === 'development' || settings.geminiDiagnosticMode) && currentJob.debugRaw?.sttFirstHalfText && (
-                        <section className="rounded-2xl border border-[#E2E8F0] bg-white p-4 shadow-[0_18px_40px_-24px_rgba(15,23,42,0.18)] mt-2">
-                          <div className="flex items-center justify-between">
-                            <h4 className="text-[#0F172A] font-semibold">STT 原始逐字稿（前半）</h4>
-                            <div className="flex gap-2">
-                              <button className="btn btn--surface" onClick={() => setShowRawStt(v => !v)}>{showRawStt ? '收合' : '查看'}</button>
-                              {showRawStt && (
-                                <>
-                                  <button className="btn btn--surface" onClick={() => window.electronAPI?.clipboard?.writeText?.(currentJob.debugRaw?.sttFirstHalfText || '')}>複製</button>
-                                  <button className="btn btn--surface" onClick={() => {
-                                    const blob = new Blob([currentJob.debugRaw?.sttFirstHalfText || ''], { type: 'text/plain;charset=utf-8' });
-                                    const url = URL.createObjectURL(blob);
-                                    const a = document.createElement('a');
-                                    a.href = url;
-                                    a.download = `${currentJob.filename.replace(/\.[^/.]+$/, '')}-stt-first-half.txt`;
-                                    document.body.appendChild(a);
-                                    a.click();
-                                    URL.revokeObjectURL(url);
-                                    a.remove();
-                                  }}>下載</button>
-                                </>
-                              )}
-                            </div>
-                          </div>
-                          {showRawStt && (
-                            <pre style={{ marginTop: 8, whiteSpace: 'pre-wrap', fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, Liberation Mono, monospace', fontSize: 13, color: '#334155' }}>
-                              {currentJob.debugRaw?.sttFirstHalfText || '（無）'}
-                            </pre>
-                          )}
-                        </section>
-                      )}
+                      {/* STT 原始逐字稿折疊區改為獨立偵錯頁，不再於此顯示 */}
                       <div className="flex justify-end mt-2">
                         <button className="btn btn--surface" onClick={async () => {
                           try {
@@ -3074,6 +3051,8 @@ ${summarySection}${transcriptSection}`;
                       showProgress={isProcessing}
                       progressValue={currentJob.progress || 0}
                       estimatedTime={currentJob.progressMessage?.match(/預估剩餘\s([^）]+)/)?.[1] || '--:--'}
+                      showDebugButton={Boolean((currentJob.debugRaw?.sttFullText || currentJob.debugRaw?.sttFirstHalfText))}
+                      onOpenDebug={() => setCurrentPage('sttDebug')}
                     />
 
                     <ProgressBar progress={currentJob.progress || 0} isVisible={isProcessing} />
@@ -3197,6 +3176,15 @@ ${summarySection}${transcriptSection}`;
         return (
           <div style={{ width: '100%', maxWidth: '960px', margin: '0 auto', textAlign: 'left' }}><GoogleSTTSettingsPage /></div>
         );
+      case 'sttDebug': {
+        const completedJobs = jobs.filter(job => job.status === 'done' && (job.transcript || job.summary));
+        const safeIndex = Math.min(currentJobIndex, Math.max(0, completedJobs.length - 1));
+        const currentJob = completedJobs[safeIndex];
+        if (!currentJob) return <div className="page-scroll"><div className="jobs-empty" style={{ marginTop: '2rem' }}><div className="empty-state__text">沒有可偵錯的作業</div></div></div>;
+        return (
+          <STTDebugPage job={currentJob} onBack={() => setCurrentPage('result')} />
+        );
+      }
       case 'prompts':
         return <PromptsPage />;
       default:

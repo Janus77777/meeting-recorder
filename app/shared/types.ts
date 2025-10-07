@@ -93,6 +93,7 @@ export interface MeetingJob {
   // 調適用原始資料（僅開發/診斷用）
   debugRaw?: {
     sttFirstHalfText?: string;
+    sttFullText?: string;
     totalDuration?: number;
   };
   progressMessage?: string;
