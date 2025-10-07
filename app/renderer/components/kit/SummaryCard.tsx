@@ -15,6 +15,20 @@ const dotClass = (p?: Priority) => {
   return 'bg-[#2563EB]'; // 低或未標記
 };
 
+const badge = (p?: Priority) => {
+  if (!p) return null;
+  const map: Record<Priority, string> = {
+    high: 'bg-[#F59E0B] text-white',
+    medium: 'bg-[#16A34A] text-white',
+    low: 'bg-[#CBD5E1] text-[#64748B]'
+  };
+  return (
+    <span className={`rounded-full px-2 py-0.5 text-xs mr-2 ${map[p]}`}>
+      {p === 'high' ? '高' : p === 'medium' ? '中' : '低'}
+    </span>
+  );
+};
+
 const parsePriority = (line: string): { text: string; p?: Priority } => {
   const m = line.match(/^\s*\[(高|中|低)\]\s+(.+)$/);
   if (!m) return { text: line };
@@ -45,6 +59,7 @@ export const SummaryCardKit: React.FC<SummaryCardProps> = ({ title = '摘要全�
           {lines.map((item, i) => (
             <li key={i} className="relative">
               <span className={`inline-block w-2 h-2 rounded-full mr-3 align-middle ${dotClass(item.p)}`} />
+              {badge(item.p)}
               <span className="align-middle">{item.text}</span>
             </li>
           ))}

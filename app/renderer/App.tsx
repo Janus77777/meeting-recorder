@@ -704,6 +704,29 @@ const App: React.FC = () => {
     return undefined;
   };
 
+  // 僅在開發模式輸出診斷資訊
+  const debugLog = (...args: any[]) => {
+    if (process.env.NODE_ENV === 'development') {
+      // eslint-disable-next-line no-console
+      console.log.apply(console, args);
+    }
+  };
+
+  // 取得 Gemini API Client（供重跑時間軸等即時請求使用）
+  const getGeminiApiClient = (): GeminiAPIClient => {
+    const currentSettings = useSettingsStore.getState().settings;
+    const geminiKey = getGeminiKey(currentSettings);
+    if (!geminiKey) {
+      throw new Error('請先在設定中配置 Gemini API Key');
+    }
+    return new GeminiAPIClient(geminiKey, {
+      preferredModel: currentSettings.geminiPreferredModel,
+      enableFallback: currentSettings.geminiEnableFallback,
+      retryConfig: currentSettings.geminiRetryConfig,
+      diagnosticMode: currentSettings.geminiDiagnosticMode
+    });
+  };
+
   const getBlobDuration = (blob: Blob): Promise<number> => {
     return new Promise((resolve, reject) => {
       const isVideo = !!blob.type && blob.type.startsWith('video');
@@ -1656,6 +1679,18 @@ const App: React.FC = () => {
         } catch {}
       }
       const sttSegments = createSTTAudioSegments(audioBlob, originalChunks, Math.max(1, Math.floor(durationForSegments)));
+      if (sttSegments && sttSegments.length > 0) {
+        const first = sttSegments[0];
+        const last = sttSegments[sttSegments.length - 1];
+        debugLog('🧪 STT 切段統計：', {
+          count: sttSegments.length,
+          first: { start: first.start, end: first.end },
+          last: { start: last.start, end: last.end },
+          totalEstimated: durationForSegments
+        });
+      } else {
+        debugLog('🧪 STT 切段統計：無切段，totalEstimated=', durationForSegments);
+      }
       console.log('📼 Google STT 分段資訊:', sttSegments.map(s => ({ index: s.index + 1, duration: s.duration })));
 
       const aggregatedSegments: STTTranscriptSegment[] = [];
@@ -1756,6 +1791,19 @@ const App: React.FC = () => {
         }));
       }
 
+      // 診斷：輸出最終段落時間戳的前幾筆
+      if (formattedSegments && formattedSegments.length > 0) {
+        debugLog('🧪 最終逐字稿段落（前 3 筆）:', formattedSegments.slice(0, 3).map((s, i) => ({
+          i,
+          start: s.start,
+          end: s.end,
+          speaker: s.speaker,
+          textSample: (s.text || '').slice(0, 32)
+        })));
+      } else {
+        debugLog('🧪 最終逐字稿段落為空');
+      }
+
       if (!finalTranscript) {
         throw new Error('無法取得 Google STT 轉錄結果');
       }
@@ -1817,6 +1865,7 @@ const App: React.FC = () => {
         const tl = await geminiClient.generateTimelineOutline(
           (formattedSegments || []).map(s => ({ start: typeof s.start === 'number' ? s.start : 0, end: typeof s.end === 'number' ? s.end : undefined, text: s.text }))
         );
+        debugLog('🧪 時間軸節點（模型輸出）數量：', Array.isArray(tl) ? tl.length : 0);
         // 簡→繁
         try {
           const { toTW } = await import('./utils/zhConvert');
@@ -2879,11 +2928,13 @@ ${summarySection}${transcriptSection}`;
                       <div className="flex justify-end mt-2">
                         <button className="btn btn--surface" onClick={async () => {
                           try {
-                            const tl = await geminiClient.generateTimelineOutline(
+                            const client = getGeminiApiClient();
+                            const tl = await client.generateTimelineOutline(
                               (currentJob.transcriptSegments || []).map(s => ({ start: typeof s.start === 'number' ? s.start : 0, end: typeof s.end === 'number' ? s.end : undefined, text: s.text }))
                             );
-                            const normalized = tl.map((t: any, i: number) => ({ id: String(i + 1), time: t.time, title: t.item, description: t.desc || '' }));
-                            updateJob(currentJob.id, { timelineItems: normalized });
+                            debugLog('🧪 重跑時間軸：模型輸出節點數量=', Array.isArray(tl) ? tl.length : 0);
+                            const normalized = tl.map((t: any) => ({ time: t.time, item: t.item, desc: t.desc || '' }));
+                            updateJob(currentJob.id, { timelineItems: normalized as any });
                           } catch (e) {
                             console.warn('重跑時間軸失敗:', e);
                           }
