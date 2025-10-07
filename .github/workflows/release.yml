@@ -1,0 +1,73 @@
+name: Release (macOS + Windows)
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  build-mac:
+    runs-on: macos-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Install deps
+        run: |
+          corepack enable
+          npm ci
+      - name: Build app
+        run: npm run build
+      - name: Build mac artifacts (DMG + ZIP) and publish
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: npx electron-builder --mac --publish always
+      - name: Upload mac artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: mac-release
+          path: release/*.{dmg,zip,yml}
+
+  build-win:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Install deps
+        run: |
+          corepack enable
+          npm ci
+      - name: Fetch ffmpeg/ffprobe (Windows x64)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $ffDir = "resources/ffmpeg/win32-x64"
+          New-Item -ItemType Directory -Force -Path $ffDir | Out-Null
+          $zipUrl = "https://www.gyan.dev/ffmpeg/builds/packages/ffmpeg-6.1.1-essentials_build.zip"
+          $zipPath = "$env:RUNNER_TEMP/ffmpeg.zip"
+          Invoke-WebRequest -Uri $zipUrl -OutFile $zipPath
+          Expand-Archive -Path $zipPath -DestinationPath $env:RUNNER_TEMP/ffmpeg -Force
+          $bin = Get-ChildItem -Recurse "$env:RUNNER_TEMP/ffmpeg" -Filter ffmpeg.exe | Select-Object -First 1
+          $probe = Get-ChildItem -Recurse "$env:RUNNER_TEMP/ffmpeg" -Filter ffprobe.exe | Select-Object -First 1
+          if (-not $bin -or -not $probe) { throw "ffmpeg/ffprobe not found in downloaded archive" }
+          Copy-Item $bin.FullName "$ffDir/ffmpeg.exe" -Force
+          Copy-Item $probe.FullName "$ffDir/ffprobe.exe" -Force
+      - name: Build (pack)
+        run: npm run build
+      - name: Build Windows installer (NSIS) and publish
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: npx electron-builder --win --publish always
+      - name: Upload windows artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-release
+          path: release/*.{exe,yml}
+
