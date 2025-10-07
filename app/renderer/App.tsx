@@ -1687,17 +1687,17 @@ const App: React.FC = () => {
 
         setRecordingStatus(`Google STT 正在處理 ${partLabel}...`);
 
-        const sttResponse: STTTranscriptionResponse = await window.electronAPI.stt.transcribe({
-          sourcePath: preparedWavPath,
-          startTimeSeconds: segment.start,
-          endTimeSeconds: segment.end,
-          languageCode: langForThisRun,
-          enableWordTimeOffsets: true,
-          enableSpeakerDiarization: enableSpeakerDiarization,
-          minSpeakerCount: enableSpeakerDiarization ? (sttSettings.minSpeakerCount ?? 1) : undefined,
-          maxSpeakerCount: enableSpeakerDiarization ? (sttSettings.maxSpeakerCount ?? 6) : undefined,
-          mimeType: 'audio/wav'
-        });
+          const sttResponse: STTTranscriptionResponse = await window.electronAPI.stt.transcribe({
+            sourcePath: preparedWavPath,
+            startTimeSeconds: segment.start,
+            endTimeSeconds: segment.end,
+            languageCode: langForThisRun,
+            enableWordTimeOffsets: !isChirp3,
+            enableSpeakerDiarization: enableSpeakerDiarization,
+            minSpeakerCount: enableSpeakerDiarization ? (sttSettings.minSpeakerCount ?? 1) : undefined,
+            maxSpeakerCount: enableSpeakerDiarization ? (sttSettings.maxSpeakerCount ?? 6) : undefined,
+            mimeType: 'audio/wav'
+          });
 
         if (!sttResponse.success || !sttResponse.transcript) {
           throw new Error(sttResponse.error || 'Google STT 轉錄失敗');

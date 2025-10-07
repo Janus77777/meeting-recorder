@@ -86,6 +86,7 @@ export class GoogleCloudSTTService {
     const recognizerIdLower = this.config.recognizerId.toLowerCase();
     const modelIdLower = (this.config.model || '').toLowerCase();
     const isChirpRecognizer = recognizerIdLower.includes('chirp') || modelIdLower.includes('chirp');
+    const isChirp3Model = recognizerIdLower.includes('chirp_3') || modelIdLower.includes('chirp_3');
 
     const diarizationConfig: protos.google.cloud.speech.v2.ISpeakerDiarizationConfig | undefined =
       options.enableSpeakerDiarization
@@ -99,7 +100,8 @@ export class GoogleCloudSTTService {
       const result: protos.google.cloud.speech.v2.IRecognitionFeatures = {};
       let hasFeature = false;
 
-      if (options.enableWordTimeOffsets) {
+      if (options.enableWordTimeOffsets && !isChirp3Model) {
+        // chirp_3 目前不支援 word timestamps，避免 INVALID_ARGUMENT 錯誤
         result.enableWordTimeOffsets = true;
         hasFeature = true;
       }
@@ -166,6 +168,7 @@ export class GoogleCloudSTTService {
       const msg = (err && err.message) ? String(err.message) : '';
       const code = (err && (err.code !== undefined)) ? Number(err.code) : undefined;
       const recognizerNotFound = msg.includes('Unable to find Recognizer') || msg.includes('NOT_FOUND');
+      const noWordTsSupported = msg.toLowerCase().includes('does not currently support word timestamps');
       if (recognizerNotFound || code === 5) {
         // 自動後備：若指定的 recognizer 不存在，改用預設 '_' 再嘗試一次
         const fallback: RecognizeRequest = {
@@ -178,6 +181,19 @@ export class GoogleCloudSTTService {
         });
         const [res2] = await this.client.recognize(fallback);
         response = res2;
+      } else if (noWordTsSupported || (code === 3 && /word\s+timestamps/i.test(msg))) {
+        // 後備：關閉 word offsets 後重試
+        const featuresFallback = { ...(recognitionConfig.features || {}) } as any;
+        if (featuresFallback && 'enableWordTimeOffsets' in featuresFallback) {
+          delete featuresFallback.enableWordTimeOffsets;
+        }
+        const request2: RecognizeRequest = {
+          ...request,
+          config: { ...recognitionConfig, features: featuresFallback }
+        };
+        console.warn('[GoogleSTT] 此模型不支援 word timestamps，已關閉 offsets 重試。');
+        const [res3] = await this.client.recognize(request2);
+        response = res3;
       } else {
         throw err;
       }
