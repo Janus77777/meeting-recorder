@@ -1,4 +1,4 @@
-import { app, BrowserWindow, ipcMain, Menu, dialog, shell, systemPreferences } from 'electron';
+import { app, BrowserWindow, ipcMain, Menu, dialog, shell, systemPreferences, desktopCapturer, session } from 'electron';
 import * as path from 'path';
 import { autoUpdater } from 'electron-updater';
 import { setupRecordingIPC } from './ipc/recording';
@@ -89,6 +89,38 @@ class MeetingRecorderApp {
       console.log('Permission check:', permission);
       return permName === 'media' || permName === 'display-capture';
     });
+
+    // Windows 專用：啟用系統音訊（WASAPI Loopback）
+    // 透過 setDisplayMediaRequestHandler 在 getDisplayMedia(audio:true) 時提供 'loopback' 音訊來源。
+    // 參考 Electron docs: session.setDisplayMediaRequestHandler(...), audio: 'loopback' 僅 Windows 支援。
+    try {
+      this.mainWindow.webContents.session.setDisplayMediaRequestHandler(async (request, callback) => {
+        try {
+          const streams: any = {};
+          if (request.audioRequested) {
+            if (process.platform === 'win32') {
+              streams.audio = 'loopback'; // 系統音訊（WASAPI Loopback）
+            } else if (request.frame) {
+              // 非 Windows：可從指定 frame 擷取（若未使用則忽略）
+              streams.audio = request.frame;
+            }
+          }
+          if (request.videoRequested) {
+            // 若有請求視訊，挑第一個螢幕；否則可省略 video。
+            const sources = await desktopCapturer.getSources({ types: ['screen'] });
+            if (sources && sources.length) {
+              streams.video = sources[0];
+            }
+          }
+          callback(streams);
+        } catch (err) {
+          console.warn('DisplayMedia handler error:', err);
+          try { callback({}); } catch {}
+        }
+      });
+    } catch (e) {
+      console.warn('setDisplayMediaRequestHandler not set:', e);
+    }
 
     // Load the app
     if (process.env.NODE_ENV === 'development') {
