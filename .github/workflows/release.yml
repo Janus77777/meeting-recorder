@@ -32,6 +32,8 @@ jobs:
           command: |
             export GH_TOKEN=${{ secrets.GITHUB_TOKEN }}
             npx electron-builder --mac --publish always
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       - name: Upload mac artifacts
         uses: actions/upload-artifact@v4
         with:
@@ -74,8 +76,9 @@ jobs:
           timeout_minutes: 45
           max_attempts: 2
           command: |
-            set GH_TOKEN=${{ secrets.GITHUB_TOKEN }}
             npx electron-builder --win --publish always
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       - name: Upload windows artifacts
         uses: actions/upload-artifact@v4
         with:
