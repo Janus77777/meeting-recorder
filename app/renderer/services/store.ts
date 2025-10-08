@@ -48,6 +48,10 @@ export const useSettingsStore = create<SettingsState>()(
         });
         console.log('🔧 Updating settings:', merged);
         set({ settings: merged });
+        try {
+          const payload = JSON.stringify({ settings: merged });
+          (window as any).electronAPI?.storage?.setItem?.('meeting-recorder-settings', payload);
+        } catch {}
         
         // Update API client when settings change
         updateAPISettings(merged);
@@ -104,7 +108,21 @@ export const useSettingsStore = create<SettingsState>()(
           updateAPISettings(merged);
         } else {
           console.log('⚠️ No settings found in localStorage, using defaults');
-          updateAPISettings(DEFAULT_SETTINGS);
+          // 嘗試從原生存儲載入
+          (async () => {
+            try {
+              const raw = await (window as any).electronAPI?.storage?.getItem?.('meeting-recorder-settings');
+              if (raw) {
+                const obj = JSON.parse(raw);
+                const s = ensureSettingsDefaults((obj?.settings || {}) as AppSettings);
+                useSettingsStore.setState({ settings: s });
+                console.log('✅ Settings restored from native storage');
+                updateAPISettings(s);
+                return;
+              }
+            } catch {}
+            updateAPISettings(DEFAULT_SETTINGS);
+          })();
         }
       },
       skipHydration: false,

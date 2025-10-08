@@ -18,6 +18,13 @@ export interface ElectronAPI {
     getPath: (name: 'home' | 'appData' | 'userData' | 'temp' | 'downloads') => Promise<string>;
   };
 
+  // Simple key-value storage persisted under app.getPath('userData')
+  storage?: {
+    getItem: (key: string) => Promise<string | null>;
+    setItem: (key: string, value: string) => Promise<void>;
+    removeItem: (key: string) => Promise<void>;
+  };
+
   // Window controls
   window: {
     minimize: () => Promise<void>;
@@ -111,6 +118,12 @@ const electronAPI: ElectronAPI = {
     getVersion: () => ipcRenderer.invoke('app:getVersion'),
     getPlatform: () => ipcRenderer.invoke('app:getPlatform'),
     getPath: (name) => ipcRenderer.invoke('app:getPath', name)
+  },
+
+  storage: {
+    getItem: (key) => ipcRenderer.invoke('storage:get', key),
+    setItem: (key, value) => ipcRenderer.invoke('storage:set', key, value),
+    removeItem: (key) => ipcRenderer.invoke('storage:remove', key)
   },
 
   window: {

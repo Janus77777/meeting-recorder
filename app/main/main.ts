@@ -336,6 +336,44 @@ class MeetingRecorderApp {
       }
     });
 
+    // Persistent storage IPC (JSON under userData)
+    const fs = require('fs');
+    const p = require('path');
+    const storageFile = p.join(app.getPath('userData'), 'app-storage.json');
+    const readStorage = () => {
+      try {
+        if (fs.existsSync(storageFile)) {
+          const raw = fs.readFileSync(storageFile, 'utf8');
+          return JSON.parse(raw);
+        }
+      } catch (e) {
+        console.warn('Failed to read storage file:', e);
+      }
+      return {};
+    };
+    const writeStorage = (obj: Record<string, string>) => {
+      try {
+        fs.mkdirSync(p.dirname(storageFile), { recursive: true });
+        fs.writeFileSync(storageFile, JSON.stringify(obj), 'utf8');
+      } catch (e) {
+        console.warn('Failed to write storage file:', e);
+      }
+    };
+    ipcMain.handle('storage:get', async (_e, key: string) => {
+      const data = readStorage();
+      return Object.prototype.hasOwnProperty.call(data, key) ? data[key] : null;
+    });
+    ipcMain.handle('storage:set', async (_e, key: string, value: string) => {
+      const data = readStorage();
+      data[key] = value;
+      writeStorage(data);
+    });
+    ipcMain.handle('storage:remove', async (_e, key: string) => {
+      const data = readStorage();
+      delete data[key];
+      writeStorage(data);
+    });
+
     // Development helpers
     if (process.env.NODE_ENV === 'development') {
       ipcMain.handle('dev:openDevTools', () => {
