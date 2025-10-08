@@ -34,6 +34,22 @@ jobs:
         run: |
           corepack enable
           npm ci
+      - name: Install ffmpeg (brew) and bundle into resources (mac)
+        shell: bash
+        run: |
+          set -e
+          if ! command -v ffmpeg >/dev/null 2>&1; then
+            brew update || true
+            brew install ffmpeg
+          fi
+          FF=$(which ffmpeg)
+          FP=$(command -v ffprobe || true)
+          ARCH=$(uname -m)
+          DEST="resources/ffmpeg/darwin-$ARCH"
+          mkdir -p "$DEST"
+          cp "$FF" "$DEST/ffmpeg"
+          if [ -n "$FP" ]; then cp "$FP" "$DEST/ffprobe"; fi
+          chmod +x "$DEST"/* || true
       - name: Write Google STT key (optional)
         if: ${{ secrets.GCP_STT_KEY_B64 != '' }}
         shell: bash

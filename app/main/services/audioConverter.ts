@@ -88,6 +88,45 @@ export class AudioConverterService {
       } catch (e) {
         console.warn('FFmpeg 路徑初始化失敗（Windows）:', e);
       }
+    } else if (process.platform === 'darwin') {
+      try {
+        const archFolder = process.arch === 'arm64' ? 'darwin-arm64' : 'darwin-x64';
+        const possiblePaths = [
+          // 內嵌於打包資源
+          path.join(process.resourcesPath, 'ffmpeg', archFolder, 'ffmpeg'),
+          path.join(__dirname, '..', '..', '..', 'resources', 'ffmpeg', archFolder, 'ffmpeg'),
+          // 常見系統安裝路徑（Homebrew）
+          '/opt/homebrew/bin/ffmpeg',
+          '/usr/local/bin/ffmpeg',
+          'ffmpeg'
+        ];
+        const possibleProbePaths = [
+          path.join(process.resourcesPath, 'ffmpeg', archFolder, 'ffprobe'),
+          path.join(__dirname, '..', '..', '..', 'resources', 'ffmpeg', archFolder, 'ffprobe'),
+          '/opt/homebrew/bin/ffprobe',
+          '/usr/local/bin/ffprobe',
+          'ffprobe'
+        ];
+        for (const pth of possiblePaths) {
+          if (pth !== 'ffmpeg' && fs.existsSync(pth)) {
+            ffmpeg.setFfmpegPath(pth);
+            break;
+          }
+          if (pth === 'ffmpeg') {
+            try { ffmpeg.setFfmpegPath('ffmpeg'); } catch {}
+          }
+        }
+        for (const pth of possibleProbePaths) {
+          if (pth !== 'ffprobe' && fs.existsSync(pth)) {
+            (ffmpeg as any).setFfprobePath?.(pth);
+            break;
+          }
+          if (pth === 'ffprobe') {
+            try { (ffmpeg as any).setFfprobePath?.('ffprobe'); } catch {}
+          }
+      } catch (e) {
+        console.warn('FFmpeg 路徑初始化失敗（macOS）:', e);
+      }
     }
   }
 
