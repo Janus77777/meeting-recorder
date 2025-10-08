@@ -30,7 +30,7 @@ jobs:
           $ffDir = "resources/ffmpeg/win32-x64"
           New-Item -ItemType Directory -Force -Path $ffDir | Out-Null
           # Download static ffmpeg and ffprobe builds
-          $zipUrl = "https://www.gyan.dev/ffmpeg/builds/packages/ffmpeg-6.1.1-essentials_build.zip"
+          $zipUrl = "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip"
           $zipPath = "$env:RUNNER_TEMP/ffmpeg.zip"
           Invoke-WebRequest -Uri $zipUrl -OutFile $zipPath
           Expand-Archive -Path $zipPath -DestinationPath $env:RUNNER_TEMP/ffmpeg -Force
@@ -66,4 +66,3 @@ jobs:
             release/*.exe
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-

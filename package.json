@@ -110,8 +110,11 @@
           "arch": ["x64","arm64"]
         }
       ],
-      "artifactName": "${productName}-${version}-${arch}.${ext}",
+      "artifactName": "MeetingRecorder-${version}-${arch}.${ext}",
       "identity": null
+    },
+    "dmg": {
+      "title": "MeetingRecorder ${version}-${arch}"
     },
     "win": {
       "target": [
@@ -122,7 +125,7 @@
           ]
         }
       ],
-      "artifactName": "${productName}-${version}.${ext}",
+      "artifactName": "MeetingRecorder-${version}.${ext}",
       "forceCodeSigning": false,
       "verifyUpdateCodeSignature": false
     },
