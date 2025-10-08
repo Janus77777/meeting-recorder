@@ -23,7 +23,7 @@ jobs:
           if [[ "$GITHUB_REF_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
             APP_VER="${GITHUB_REF_NAME#v}"
             echo "Setting package.json version to $APP_VER for reproducible release"
-            jq --arg v "$APP_VER" '.version=$v' package.json > package.json.tmp && mv package.json.tmp package.json
+            jq --arg v "$APP_VER" '.version=$v | .build.productName="Meeting Recorder"' package.json > package.json.tmp && mv package.json.tmp package.json
             cat package.json | jq '.version'
           fi
       - name: Setup Node

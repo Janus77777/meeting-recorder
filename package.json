@@ -101,15 +101,16 @@
     "mac": {
       "category": "public.app-category.productivity",
       "target": [
-        {
-          "target": "zip",
-          "arch": ["x64","arm64"]
-        }
+        { "target": "dmg", "arch": ["x64","arm64"] },
+        { "target": "zip", "arch": ["x64","arm64"] }
       ],
       "artifactName": "MeetingRecorder-${version}-${arch}.${ext}",
       "identity": null
     },
-    "dmg": null,
+    "dmg": {
+      "title": "MeetingRecorder ${version}-${arch}",
+      "artifactName": "MeetingRecorder-${version}-${arch}.dmg"
+    },
     "win": {
       "target": [
         {
