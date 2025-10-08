@@ -86,14 +86,7 @@ jobs:
         run: |
           corepack enable
           npm ci
-      - name: Write Google STT key (optional)
-        if: ${{ secrets.GCP_STT_KEY_B64 != '' }}
-        shell: pwsh
-        env:
-          GCP_STT_KEY_B64: ${{ secrets.GCP_STT_KEY_B64 }}
-        run: |
-          New-Item -ItemType Directory -Force -Path resources/credentials | Out-Null
-          [IO.File]::WriteAllBytes("resources/credentials/google-stt.json", [Convert]::FromBase64String($env:GCP_STT_KEY_B64))
+      # Windows 不內嵌金鑰（照你的要求僅 mac 內嵌）
       - name: Fetch ffmpeg/ffprobe (Windows x64)
         shell: pwsh
         run: |
