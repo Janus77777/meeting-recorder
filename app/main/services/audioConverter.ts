@@ -124,6 +124,7 @@ export class AudioConverterService {
           if (pth === 'ffprobe') {
             try { (ffmpeg as any).setFfprobePath?.('ffprobe'); } catch {}
           }
+        }
       } catch (e) {
         console.warn('FFmpeg 路徑初始化失敗（macOS）:', e);
       }
