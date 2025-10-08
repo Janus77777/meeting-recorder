@@ -34,6 +34,14 @@ jobs:
         run: |
           corepack enable
           npm ci
+      - name: Write Google STT key (optional)
+        if: ${{ secrets.GCP_STT_KEY_B64 != '' }}
+        shell: bash
+        env:
+          GCP_STT_KEY_B64: ${{ secrets.GCP_STT_KEY_B64 }}
+        run: |
+          mkdir -p resources/credentials
+          echo "$GCP_STT_KEY_B64" | base64 --decode > resources/credentials/google-stt.json
       - name: Build app
         run: npm run build
       - name: Build mac artifacts (DMG + ZIP) and publish (retry)
@@ -78,6 +86,14 @@ jobs:
         run: |
           corepack enable
           npm ci
+      - name: Write Google STT key (optional)
+        if: ${{ secrets.GCP_STT_KEY_B64 != '' }}
+        shell: pwsh
+        env:
+          GCP_STT_KEY_B64: ${{ secrets.GCP_STT_KEY_B64 }}
+        run: |
+          New-Item -ItemType Directory -Force -Path resources/credentials | Out-Null
+          [IO.File]::WriteAllBytes("resources/credentials/google-stt.json", [Convert]::FromBase64String($env:GCP_STT_KEY_B64))
       - name: Fetch ffmpeg/ffprobe (Windows x64)
         shell: pwsh
         run: |
